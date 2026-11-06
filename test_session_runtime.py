@@ -8,6 +8,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, Mock
 
 from session_runtime import CommandSession
+from dialog_memory import DialogMemory
 from test_command_states import FRAME, load_function
 
 
@@ -34,7 +35,7 @@ class SessionTests(unittest.TestCase):
         namespace = dict(np=NS(int16=None, frombuffer=lambda *a, **k: pcm,
                                max=lambda _: 0, abs=lambda x, **kwargs: x),
                          log=Mock(), wave=NS(open=MagicMock()), open=MagicMock(),
-                         time=NS(time=lambda: 0), CHAT_HISTORY=history if history is not None else [],
+                         time=NS(time=lambda: 0), dialog_memory=history if history is not None else DialogMemory(),
                          os=NS(path=NS(exists=lambda _: True), remove=Mock()),
                          groq_client=NS(audio=NS(transcriptions=NS(create=stt)),
                                         chat=NS(completions=NS(create=llm))),
@@ -62,7 +63,7 @@ class SessionTests(unittest.TestCase):
     def test_reconnect_serializes_pipeline_and_discards_stale_stt_result(self):
         old, old_conn = self.session()
         new, _ = self.session()
-        history = []
+        history = DialogMemory()
         process1, env1, stt1, llm1, tts1 = self.pipeline(history)
         process2, env2, stt2, _, tts2 = self.pipeline(history)
         entered, release = threading.Event(), threading.Event()
@@ -88,7 +89,7 @@ class SessionTests(unittest.TestCase):
         tts1.assert_not_called()
         tts2.assert_called_once()
         old_conn.sendall.assert_not_called()
-        self.assertEqual(history, [{'role': 'user', 'content': 'new command'},
+        self.assertEqual(history.prepare('', '')[0][1:-1], [{'role': 'user', 'content': 'new command'},
                                    {'role': 'assistant', 'content': 'reply'}])
         first_path = env1['wave'].open.call_args.args[0]
         second_path = env2['wave'].open.call_args.args[0]
@@ -114,7 +115,7 @@ class SessionTests(unittest.TestCase):
         session.close()
         release.set()
         self.join(session)
-        self.assertEqual(env['CHAT_HISTORY'], [])
+        self.assertEqual(env['dialog_memory'].prepare('', '')[0][1:-1], [])
         tts.assert_not_called()
 
     def test_disconnected_queued_worker_never_calls_pipeline(self):

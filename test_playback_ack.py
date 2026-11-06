@@ -137,8 +137,8 @@ class ServerAckIntegrationTests(unittest.TestCase):
             return conn, ('offline', 0)
         listener.accept = accept
         class ObservedSession(CommandSession):
-            def __init__(self, *args):
-                super().__init__(*args)
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
                 sessions.append(self)
         completed = threading.Event()
         def process(writer, *args, **kwargs):

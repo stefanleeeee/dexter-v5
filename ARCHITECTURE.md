@@ -1,5 +1,65 @@
 # Фактическая архитектура Dexter
 
+## Этап 4 завершён и принят пользователем
+
+Пользователь подтвердил аппаратную приёмку памяти, компактных записей, политики
+длины и безопасного follow-up. В последнем тесте зафиксированы FRESH CAPTURE
+REQUESTED/CONFIRMED, FOLLOWUP WINDOW OPENED/ACCEPTED, успешные уточнения без имени,
+PLAYBACK DONE, WINDOW EXPIRED и ограничение истории шестью парами.
+Это подтверждение владельца, не новый аппаратный тест при публикации. Дополнительные
+Reset/акустические/длительные сценарии не объявляются проверенными без отдельных
+данных. Следующий этап 5 — управление Windows; он не реализован и не начат.
+Эта запись приоритетнее исторических pending/blocked ниже.
+
+## RAM memory and dialogue policy
+
+A single process-local DialogMemory deque belongs to the conversation, not TCP.
+Full original user/visible assistant pairs are saved after stop/done and matching
+playback ACK; partial length/empty/cancel/error/stale results are excluded. Clear
+and commit use a version and mutex, with CommandSession guards intact. Reconnect
+retains completed pairs; process restart clears them. No disk history/reasoning/audio.
+History limits default6 turns/1500 estimated tokens. Whole old pairs are evicted;
+oversized answers become explicitly marked original-sentence extracts, retaining
+the exact question; if even the minimum cannot fit, the pair is skipped. Token
+estimate is approximate (ASCII/3,Cyrillic/2,other UTF8 bytes,+16/message); total
+model-window protection separately retains the strict byte+16 budget including
+system/current/history,completion reserve and1024 overhead. No summarization API.
+System prompt guides proportional short answers, explicit detail and uncertainty;
+model/budget/phonetic rules and both streaming/full paths remain unchanged.
+
+## Этап4.3 — fresh-capture follow-up, принят пользователем
+
+Актуальный приоритет над историей ниже:политика4.2 принята пользователем,
+follow-up4.3 реализован с разрешённым согласованным расширением обеих сторон.
+0x17/0x18 zero-body probe/support;0x19/0x1A full32byte responseID request/ready.
+Существующие headers,PCM,0x11..0x16,модели,память иstreaming не менялись.
+Пока capability/READY отсутствуют — wake-only fallback. СтарыйESP безопасно
+игнорирует0x17,новыйESP не отвечает безprobe,новыйсервер не шлётbody вlegacy.
+
+Probe/fresh пишет существующий command worker; ACK/capability/READY читает
+единственный receiver. ESP freshrequest привязан к последнему фактически
+отправленному normalDONE,одноразовый fullID включаетUUIDconnection/counter.
+Micmutex вращаетgeneration,очищаетring,блокируетenqueue.DRAIN исполняетmic task:
+300ms acousticpause, RXdisable/enable,discard >реальнойtotalDMAbytes с1sdeadline,
+20ms/read. ESP-IDF6.1 RXqueue/currentpointer reset проверен влокальномSDK.
+Drivercallsвнеmutex/TCP. READY отправляет толькоTCP передreleaseenqueue.
+Старый producerread/generation не можетenqueue послеfence. ОшибкаRX sticky доReset;
+ESPdeadline2s/Pythonwait2.5s;нетREADY→нетокна,partialsend→disconnect.
+
+Receiver mode расширен FOLLOWUP внутри CommandSession, второйstate machine нет.
+PROCESSING включаетplayback иfreshwait. Непустойstop/done+ACK разрешаетfreshrequest;
+partial/cancel/error/empty не разрешают. Poll открываетwindow толькопослеREADY
+иосвобожденияworker/writer/pipeline. Deadline monotonic12s не продлевается шумом.
+3VADframes подтверждаютначалоCOMMAND,не меньше10VADframes/300ms речи доSTT;
+остальные COMMAND границы прежние. Console cancel/clear толькосигнализируют,
+receiverсбрасываетmode. Reconnectне переноситwindow;timeoutне очищаетRAMmemory.
+
+Самопрослушивание старойзаписи исключается fence+READYordering,неоднимsleep.
+Физическоеэхо/музыка неустранены:нетAEC/voicebarge-in.Пауза300ms доRXreset требует
+аппаратнойпроверки;ранняя речь можетбытьотброшена. Подробностипротокола,tests,
+flash/rollback — FOLLOWUP_PLAN.md/README.md.304tests/fullbuildpassed,плату прошил и проверил пользователь; агент её не прошивал.
+
+
 ## Этап 3 — принятая streaming-архитектура (2026-11-06)
 
 Groq LLM streaming → буфер законченных фраз → фонетическая нормализация → Silero

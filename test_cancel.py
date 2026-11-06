@@ -202,7 +202,7 @@ class CancelTests(unittest.TestCase):
                 self.assertTrue(session.request_cancel())
                 release.set()
                 self.join(session)
-                self.assertEqual(env['CHAT_HISTORY'], [])
+                self.assertEqual(env['dialog_memory'].prepare('', '')[0][1:-1], [])
                 tts.assert_not_called()
                 if stage == 'stt': llm.assert_not_called()
                 session.conn.sendall.assert_not_called()
@@ -236,6 +236,7 @@ class CancelTests(unittest.TestCase):
         self.assertEqual(session.request_cancel.call_count, 2)
         session.request_cancel.assert_called_with(expected_id='generation_command')
         session.command_id = None
+        session.cancel_followup.return_value = False
         self.assertFalse(control.cancel_current())
 
     def test_no_active_console_command_is_safe(self):

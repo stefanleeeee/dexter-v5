@@ -34,6 +34,11 @@ static SemaphoreHandle_t mic_mutex;
 static bool mic_connected = false;
 static uint32_t mic_generation = 1;
 static uint32_t mic_drops;
+// Fresh capture state: protected by the existing mic mutex.
+enum { MIC_FRESH_IDLE, MIC_FRESH_DRAIN, MIC_FRESH_READY, MIC_FRESH_ERROR };
+static unsigned mic_fresh_phase;
+static bool mic_fresh_sticky_error;
+
 
 i2s_chan_handle_t tx_chan; 
 i2s_chan_handle_t rx_chan; 
@@ -117,7 +122,7 @@ void i2s_init(void) {
 // the previous connection must not be queued after reconnect.
 static uint32_t mic_capture_generation(void) {
     xSemaphoreTake(mic_mutex, portMAX_DELAY);
-    uint32_t generation = mic_connected ? mic_generation : 0;
+    uint32_t generation = mic_connected && mic_fresh_phase == MIC_FRESH_IDLE ? mic_generation : 0;
     xSemaphoreGive(mic_mutex);
     return generation;
 }
@@ -125,6 +130,7 @@ static uint32_t mic_capture_generation(void) {
 static void mic_set_connected(bool connected) {
     xSemaphoreTake(mic_mutex, portMAX_DELAY);
     mic_connected = false;
+    mic_fresh_phase = MIC_FRESH_IDLE;
     if (++mic_generation == 0) ++mic_generation; // Zero means disconnected.
     size_t size;
     void *item;
@@ -138,12 +144,76 @@ static void mic_set_connected(bool connected) {
 static BaseType_t mic_enqueue(const void *pcm, size_t size, uint32_t generation) {
     xSemaphoreTake(mic_mutex, portMAX_DELAY);
     BaseType_t result = pdTRUE; // Disconnected/stale audio is deliberately dropped.
-    if (mic_connected && generation != 0 && generation == mic_generation) {
+    if (mic_connected && mic_fresh_phase == MIC_FRESH_IDLE && generation != 0 && generation == mic_generation) {
         result = xRingbufferSend(audio_ringbuf, pcm, size, pdMS_TO_TICKS(10));
         if (result != pdTRUE) ++mic_drops;
     }
     xSemaphoreGive(mic_mutex);
     return result;
+}
+
+// Only the microphone producer calls RX driver APIs, never TCP or a mutex owner.
+static bool mic_request_fresh(void) {
+    xSemaphoreTake(mic_mutex, portMAX_DELAY);
+    bool ok = mic_connected && mic_fresh_phase == MIC_FRESH_IDLE && !mic_fresh_sticky_error;
+    if (ok) {
+        if (++mic_generation == 0) ++mic_generation;
+        size_t size;
+        void *item;
+        while ((item = xRingbufferReceive(audio_ringbuf, &size, 0)) != NULL)
+            vRingbufferReturnItem(audio_ringbuf, item);
+        mic_fresh_phase = MIC_FRESH_DRAIN;
+    }
+    xSemaphoreGive(mic_mutex);
+    return ok;
+}
+
+static unsigned mic_fresh_status(void) {
+    xSemaphoreTake(mic_mutex, portMAX_DELAY);
+    unsigned phase = mic_fresh_phase;
+    xSemaphoreGive(mic_mutex);
+    return phase;
+}
+
+static void mic_fresh_release(void) {
+    xSemaphoreTake(mic_mutex, portMAX_DELAY);
+    if (mic_fresh_phase == MIC_FRESH_READY) mic_fresh_phase = MIC_FRESH_IDLE;
+    xSemaphoreGive(mic_mutex);
+}
+
+static void mic_service_fresh(void) {
+    xSemaphoreTake(mic_mutex, portMAX_DELAY);
+    bool requested = mic_connected && mic_fresh_phase == MIC_FRESH_DRAIN;
+    uint32_t generation = mic_generation;
+    xSemaphoreGive(mic_mutex);
+    if (!requested) return;
+    // Acoustic tail protection, NOT the freshness proof. No barge-in/AEC.
+    vTaskDelay(pdMS_TO_TICKS(300));
+    i2s_chan_info_t info;
+    bool ok = i2s_channel_get_info(rx_chan, &info) == ESP_OK && info.total_dma_buf_size > 0;
+    if (ok) ok = i2s_channel_disable(rx_chan) == ESP_OK;
+    if (ok) ok = i2s_channel_enable(rx_chan) == ESP_OK;
+    // Drain more than the entire RX DMA capacity after restart. This also
+    // consumes old software-queued descriptors; no old DMA/sample can cross READY.
+    uint8_t discard[1024];
+    size_t remaining = ok ? info.total_dma_buf_size + sizeof(discard) : 0;
+    int64_t deadline = esp_timer_get_time() + 1000000;
+    while (ok && remaining) {
+        size_t received = 0;
+        size_t requested_bytes = remaining < sizeof(discard) ? remaining : sizeof(discard);
+        esp_err_t err = i2s_channel_read(rx_chan, discard, requested_bytes, &received, 20);
+        if (esp_timer_get_time() >= deadline ||
+            (err != ESP_OK && err != ESP_ERR_TIMEOUT) || received > requested_bytes || received % 4) {
+            ok = false;
+        } else {
+            remaining -= received;
+        }
+    }
+    xSemaphoreTake(mic_mutex, portMAX_DELAY);
+    if (!ok) mic_fresh_sticky_error = true; // Unknown RX driver state requires Reset.
+    if (mic_connected && mic_generation == generation && mic_fresh_phase == MIC_FRESH_DRAIN)
+        mic_fresh_phase = ok ? MIC_FRESH_READY : MIC_FRESH_ERROR;
+    xSemaphoreGive(mic_mutex);
 }
 
 static void mic_i2s_task(void *pvParameters) {
@@ -154,8 +224,9 @@ static void mic_i2s_task(void *pvParameters) {
     ESP_LOGI(TAG, "I2S Mic sampler START (Continuous Stream)");
 
     while (1) {
+        mic_service_fresh();
         uint32_t generation = mic_capture_generation();
-        esp_err_t err = i2s_channel_read(rx_chan, raw_buf, sizeof(raw_buf), &bytes_read, portMAX_DELAY);
+        esp_err_t err = i2s_channel_read(rx_chan, raw_buf, sizeof(raw_buf), &bytes_read, 50);
         
         if (err == ESP_OK && bytes_read > 0) {
             int samples = bytes_read / 4; 
@@ -178,6 +249,11 @@ static void mic_i2s_task(void *pvParameters) {
 }
 
 // TCP I/O limits: per frame, not reset by successful trickle traffic.
+static bool followup_probe_pending;
+static bool fresh_pending, fresh_done_valid;
+static uint8_t fresh_token[32], fresh_done_token[32];
+static int64_t fresh_deadline;
+
 #define TCP_IO_TIMEOUT_US 10000000LL
 #define TCP_CONNECT_TIMEOUT_US 10000000LL
 #define TCP_RETRY_MS 2000
@@ -265,8 +341,12 @@ static int tcp_audio_poll(int fd) {
 static int tcp_handle_message(int fd, const uint8_t header[5]) {
     uint32_t length = ((uint32_t)header[1] << 24) | ((uint32_t)header[2] << 16) |
                       ((uint32_t)header[3] << 8) | (uint32_t)header[4];
+    if (header[0] == 0x17 && length == 0) {
+        followup_probe_pending = true;
+        return 0;
+    }
     if (header[0] == 0x12) return tcp_play_audio(fd, length);
-    if ((header[0] == 0x11 || header[0] == 0x13 || header[0] == 0x15) && length == PLAYBACK_TOKEN_BYTES) {
+    if ((header[0] == 0x11 || header[0] == 0x13 || header[0] == 0x15 || header[0] == 0x19) && length == PLAYBACK_TOKEN_BYTES) {
         control_rx.type = header[0];
         control_rx.position = 0;
         control_rx.deadline = esp_timer_get_time() + TCP_IO_TIMEOUT_US;
@@ -289,9 +369,23 @@ static int tcp_control_poll(int fd) {
         control_rx.position += (size_t)count;
         if (esp_timer_get_time() >= control_rx.deadline) return -1;
         if (control_rx.position == PLAYBACK_TOKEN_BYTES) {
+            if (control_rx.type == 0x19) {
+                bool valid = fresh_done_valid && !fresh_pending &&
+                    memcmp(control_rx.token, fresh_done_token, 32) == 0;
+                if (valid && mic_request_fresh()) {
+                    memcpy(fresh_token, control_rx.token, 32);
+                    fresh_pending = true;
+                    fresh_done_valid = false; // A response ID is usable only once.
+                    fresh_deadline = esp_timer_get_time() + 2000000;
+                    ESP_LOGI(TAG, "[FRESH CAPTURE REQUESTED]");
+                }
+                control_rx.type = 0;
+                return 1; // Stale/unready request never changes capture generation.
+            }
             bool cancel = control_rx.type == 0x15;
             bool valid = cancel ? playback_cancel(control_rx.token) :
                 (control_rx.type == 0x11 ? playback_begin(control_rx.token) : playback_end(control_rx.token));
+            if ((cancel || control_rx.type == 0x11) && valid) fresh_done_valid = false;
             if (cancel && valid) audio_rx.remaining = audio_rx.buffered = 0;
             if (valid) ESP_LOGI(TAG, "[PLAYBACK %s] %02x%02x%02x%02x",
                 cancel ? "CANCEL" : (control_rx.type == 0x11 ? "START" : "EOS"), control_rx.token[28], control_rx.token[29],
@@ -315,8 +409,33 @@ static int tcp_send_playback_ack(int fd) {
     uint8_t message[5 + PLAYBACK_TOKEN_BYTES] = {type, 0, 0, 0, PLAYBACK_TOKEN_BYTES};
     memcpy(message + 5, token, PLAYBACK_TOKEN_BYTES);
     int result = tcp_send_all(fd, message, sizeof(message), esp_timer_get_time() + TCP_IO_TIMEOUT_US);
+    if (result == 0 && type == 0x14) {
+        memcpy(fresh_done_token, token, 32);
+        fresh_done_valid = true;
+    }
     if (result == 0) ESP_LOGI(TAG, "[PLAYBACK %s] %02x%02x%02x%02x", type == 0x16 ? "CANCELLED" : "ACK", token[28], token[29], token[30], token[31]);
     return result;
+}
+
+static int tcp_send_followup(int fd) {
+    if (followup_probe_pending) {
+        uint8_t message[5] = {0x18, 0, 0, 0, 0};
+        if (tcp_send_all(fd, message, sizeof(message), esp_timer_get_time() + TCP_IO_TIMEOUT_US) != 0) return -1;
+        followup_probe_pending = false;
+        ESP_LOGI(TAG, "[FOLLOWUP SUPPORTED] v1");
+    }
+    if (!fresh_pending) return 0;
+    unsigned phase = mic_fresh_status();
+    if (phase == MIC_FRESH_ERROR || esp_timer_get_time() >= fresh_deadline) return -1;
+    if (phase == MIC_FRESH_READY) {
+        uint8_t message[37] = {0x1A, 0, 0, 0, 32};
+        memcpy(message + 5, fresh_token, 32);
+        if (tcp_send_all(fd, message, sizeof(message), fresh_deadline) != 0) return -1;
+        fresh_pending = false;
+        mic_fresh_release(); // Only post-fence PCM can follow READY on this writer.
+        ESP_LOGI(TAG, "[FRESH CAPTURE CONFIRMED]");
+    }
+    return 0;
 }
 
 // Poll one header fragment so mic uplink continues while the server is silent.
@@ -369,6 +488,7 @@ static void tcp_client_task(void *pvParameters) {
 
     while (1) {
         mic_set_connected(false);
+        followup_probe_pending = fresh_pending = fresh_done_valid = false;
         playback_set_connected(false);
         audio_rx.remaining = 0;
         audio_rx.buffered = 0;
@@ -410,6 +530,7 @@ static void tcp_client_task(void *pvParameters) {
             if (!(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)) break;
             if (playback_failed()) break;
             if (tcp_send_playback_ack(sock) != 0) break;
+            if (tcp_send_followup(sock) != 0) break;
             if (control_rx.type) {
                 if (tcp_control_poll(sock) < 0) break;
             } else if (audio_rx.remaining || audio_rx.buffered) {

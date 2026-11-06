@@ -22,6 +22,9 @@ FRAME = b'\0' * 960
 
 
 def load_function(name, namespace, command_limit=None):
+    from dialog_memory import DialogMemory
+    namespace.setdefault('dialog_memory', DialogMemory())
+    namespace.setdefault('json', json)
     namespace.setdefault('CommandCancelled', CommandCancelled)
     from llm_options import completion_options
     namespace.setdefault('completion_options', completion_options)
@@ -177,7 +180,7 @@ class StateTests(unittest.TestCase):
                     {'stt': stt, 'llm': llm, 'tts': tts}[stage].side_effect = failure
                 remove = Mock()
                 namespace = dict(np=np, log=lambda *a: None, wave=NS(open=Mock()),
-                                 open=Mock(), time=NS(time=lambda: 0), CHAT_HISTORY=[],
+                                 open=Mock(), time=NS(time=lambda: 0), 
                                  os=NS(path=NS(exists=lambda _: True), remove=remove),
                                  groq_client=NS(audio=NS(transcriptions=NS(create=stt)),
                                                 chat=NS(completions=NS(create=llm))),

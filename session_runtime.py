@@ -4,6 +4,7 @@ import os
 import struct
 import threading
 import uuid
+import time
 
 
 # Includes history, cloud calls and Silero: a disconnected worker may still be
@@ -19,7 +20,7 @@ class CommandCancelled(Exception):
 
 
 class CommandSession:
-    def __init__(self, conn, log):
+    def __init__(self, conn, log, *, followup_enabled=False, followup_timeout_s=12, clock=time.monotonic):
         self.conn = conn
         self.log = log
         self.generation = uuid.uuid4().hex
@@ -42,6 +43,85 @@ class CommandSession:
         self._command_finished = False
         self._playback_finished = False
         self._playback_started = False
+        self._followup_enabled = followup_enabled
+        self._followup_timeout = followup_timeout_s
+        self._clock = clock
+        self._probe_sent = self._supports_followup = False
+        self._fresh_event = threading.Event()
+        self._fresh_expected = self._completed_playback_token = None
+        self._fresh_confirmed = self._followup_cancelled = False
+        self._followup_deadline = None
+        self._followup_run = 0
+        self._from_followup = False
+
+    def receive_followup_capability(self):
+        with self._gate:
+            if not self._probe_sent or self._cancelled.is_set():
+                return False
+            first = not self._supports_followup
+            self._supports_followup = True
+        if first: self.log('[FOLLOWUP SUPPORTED] Fresh capture v1')
+        return True
+
+    def receive_fresh_capture(self, token):
+        with self._gate:
+            if (self._cancelled.is_set() or self._followup_cancelled or
+                    self._fresh_expected is None or token != self._fresh_expected):
+                return False
+            self._fresh_confirmed = True
+            self._fresh_event.set()
+        self.log('[FRESH CAPTURE CONFIRMED] Current reply/session')
+        return True
+
+    def cancel_followup(self, *, invalidate=False):
+        # Console only signals; receiver remains the sole state owner.
+        with self._gate:
+            active = (self._followup_deadline is not None or self._fresh_expected is not None
+                      or self._from_followup or
+                      (self._worker is not None and self._playback_finished))
+            if not active and not invalidate: return False
+            self._followup_cancelled = True
+            self._fresh_event.set()
+        if active: self.log('[FOLLOWUP CANCELLED] Local control; fallback to wake word')
+        return active
+
+    def followup_speech(self, is_speech):
+        if self._cancelled.is_set(): return False
+        self.poll()
+        if self.state['mode'] != 'FOLLOWUP': return False
+        self._followup_run = self._followup_run + 1 if is_speech else 0
+        if self._followup_run < 3: return False
+        self._followup_deadline = None
+        self._from_followup = True
+        self.state['mode'] = 'COMMAND'
+        self.state['session_id'] = uuid.uuid4().hex
+        self.log('[FOLLOWUP ACCEPTED] Speech onset; one command')
+        return True
+
+    def end_followup_capture(self):
+        # Receiver-only cleanup when a short/noisy recording is discarded.
+        self._from_followup = False
+        self._followup_deadline = None
+        self._followup_run = 0
+
+    def _request_fresh_capture(self):
+        with self._gate:
+            if (not self._supports_followup or not self._playback_finished or
+                    self._followup_cancelled or self._command_cancelled.is_set()):
+                self.log('[FOLLOWUP FALLBACK] Unsupported/not eligible; wake word required')
+                return
+            token = self._completed_playback_token
+            if token is None: return
+            self._fresh_expected = token
+            self._fresh_event.clear()
+        self.log('[FRESH CAPTURE REQUESTED] Current reply/session')
+        self.sendall(struct.pack('>BI', 0x19, 32) + token)
+        self._fresh_event.wait(2.5)
+        self.check_active()
+        with self._gate:
+            self._fresh_expected = None
+        if not self._fresh_confirmed:
+            self.log('[FOLLOWUP FALLBACK] Fresh capture not confirmed; wake word required')
 
     @property
     def command_id(self):
@@ -159,6 +239,7 @@ class CommandSession:
             self._playback_token = None
             self._playback_eos = False
             self._playback_finished = True
+            self._completed_playback_token = token
         self.log(f'[PLAYBACK DONE] {token[-4:].hex()}: ESP I2S drain acknowledged')
 
     def __enter__(self):
@@ -208,6 +289,11 @@ class CommandSession:
         with self._gate:
             self._command_id = worker_state['session_id']
             self._command_finished = self._playback_finished = False
+            self._completed_playback_token = self._fresh_expected = None
+            self._fresh_confirmed = self._followup_cancelled = False
+            self._followup_deadline = None
+            self._from_followup = False
+            worker_state['followup_success'] = False
             self._playback_started = False
             self._command_cancelled = threading.Event()
             self._cancel_ack = threading.Event()
@@ -230,7 +316,13 @@ class CommandSession:
                 acquired = _PROCESS_LOCK.acquire(timeout=0.05)
             self.check_active()
             self._writer = threading.get_ident()
+            if self._followup_enabled and not self._probe_sent:
+                self._probe_sent = True
+                # Old firmware ignores unknown ZERO-LENGTH controls safely.
+                self.sendall(struct.pack('>BI', 0x17, 0))
             process(self, audio, worker_state, session=self)
+            if self._followup_enabled and worker_state.get('followup_success'):
+                self._request_fresh_capture()
         except CommandCancelled:
             self.log('[CANCEL] Worker stopped at a safe boundary')
         except Exception as error:
@@ -257,14 +349,32 @@ class CommandSession:
             self._worker = None
             self._done.clear()
             if not self._cancelled.is_set():
+                if self._fresh_confirmed and not self._followup_cancelled:
+                    self.state['mode'] = 'FOLLOWUP'
+                    self._followup_run = 0
+                    self._followup_deadline = self._clock() + self._followup_timeout
+                    self.log(f'[FOLLOWUP WINDOW OPENED] {self._followup_timeout:g}s')
+                else:
+                    self.state['mode'] = 'WAKE_WORD'
+                    self.log('[ОЖИДАНИЕ] Декстер снова ждет своего имени...')
+        if self.state['mode'] == 'FOLLOWUP' or (self.state['mode'] == 'COMMAND' and self._from_followup):
+            expired = self._followup_deadline is not None and self._clock() >= self._followup_deadline
+            if self._followup_cancelled or expired:
                 self.state['mode'] = 'WAKE_WORD'
-                self.log('[ОЖИДАНИЕ] Декстер снова ждет своего имени...')
+                self._followup_deadline = None
+                self._from_followup = False
+                self._followup_run = 0
+                self.log('[FOLLOWUP WINDOW EXPIRED] Fallback to wake word' if expired else
+                         '[FOLLOWUP FALLBACK] Cancel/clear; wake word required')
 
     def close(self, abort=False):
         with self._gate:
             if self._cancelled.is_set():
                 return
             self._cancelled.set()
+            self._followup_cancelled = True
+            self._followup_deadline = None
+            self._fresh_event.set()
             self._playback_ack.set()
             self._cancel_ack.set()
         self._close_socket(abort)

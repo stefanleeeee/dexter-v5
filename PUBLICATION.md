@@ -1,35 +1,33 @@
-# Phase 3 stable publication review
+# Phase 4 stable publication review
 
-Accepted milestone: Streaming Voice Responses. Target main; one commit
-`feat: Phase 3 - Streaming Voice Responses`; annotated tag
-`v0.3.0-streaming-stable`. Prior history/tags are retained. Phases1–3 complete;
-Phase4 dialogue context/natural conversation is next, not implemented.
+Accepted milestone: Contextual Voice Dialogue. Existing main; one new commit
+`feat: Phase 4 - Contextual Voice Dialogue`; annotated tag
+`v0.4.0-dialogue-stable`. Parent is phase3 commit
+`75ddf62234a871f35c3cb93c855dc430663ee37d`. Existing tags/history are preserved.
+Phases1–4 complete/accepted; Phase5 Windows control is next and not implemented.
 
-The owner reports short/long ESP32 streaming playback, first phrase transmission
-about0.6–1.2s after LLM start, and a10-sentence/~110s reply with stop/done/PLAYBACK
-DONE. These are owner-reported results; no new acoustic/Reset/stall measurements
-are invented. Publication itself performs no real Groq requests or hardware flash.
+Owner acceptance covers fresh capture requested/confirmed, follow-up open/accepted,
+successful short contextual follow-ups, playback DONE, window expiry and six-turn
+history bound. Other acoustic/Reset/long-session scenarios are not invented.
+No new hardware flash or Groq calls are made for publication.
 
-Only allowlisted Python source/tests, safe .env.example, README/docs are updated.
-Firmware, dependency pins, weights and local settings remain unchanged. Local
-configs are never overwritten. MANIFEST.txt lists the entire proposed tree.
+Publish only Python source/tests, documentation, safe templates, ESP source and
+existing safe sdkconfig.defaults. Preserve deployment instructions and local model
+provisioning. Keep filled .env/Wi-Fi headers, generated sdkconfig, models/weights,
+reference/audio, logs, build outputs, backups, virtual environments and caches out.
+MANIFEST.txt lists the complete proposed tree. Local configs are not overwritten.
 
-Exclude filled .env/Wi-Fi headers, generated sdkconfig/build/binaries, .pt/model
-weights, Vosk data, audio/reference/WAV, logs, venvs, backups, caches and private
-raw benchmark/environment reports. Ignore tests supplement, not replace, content
-inspection. Check staged list/full diff, known secrets without printing values,
-private paths/accounts, token/private-key patterns, sizes/binary/reference content,
-then commit/tag and every Git object. Automated scanning is not an absolute guarantee.
-No dedicated scanner installation is required for this audit.
+304 regression tests passed against the public source and its own ESP source;
+ESP-IDF bootloader+app build target passed, app0xca470 with21% app space free.
+No clean dependency installation is claimed. No new runtime/dependency changes
+are introduced just for publication. See STATUS/README for exact evidence/limits.
 
-Regression target:224 tests via unittest discovery, including mode/config,
-stop/partial_length/empty_length/cancelled/error, EOS/ACK/CANCEL and history rules,
-phrase order, bounded buffers/backpressure, stale audio, normalizer and rollback.
-README documents LLM_STREAMING, LLM_MAX_COMPLETION_TOKENS, LLM_REASONING_EFFORT,
-LLM_INCLUDE_REASONING, startup/env precedence and local trusted weight deployment.
-No clean network dependency installation is claimed.
+Inspect staged list/full diff, known local secrets without revealing values,
+token/key patterns, personal data/private paths, binary/reference content and all
+Git objects. Ignore rules supplement, not replace, content inspection. Audit the
+actual commit and annotated tag before push. Scanning is not an absolute guarantee.
 
-Remote main must still equal the known phase2 commit before push. If the tag
-exists unexpectedly or history diverges, stop. Push only main and this annotated
-tag without force; anonymously verify the branch/tag/commit and every public blob
-against the audited tree. Local reports/backups remain outside this repository.
+Remote main must still equal the parent above; stop on unexpected changes or tag
+conflict. Push only main and this tag, never force. Verify public GitHub main/tag
+and every published blob against the audited commit. Reports/backups stay outside
+this repository. No Phase5 work is authorized by this release.

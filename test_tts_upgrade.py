@@ -168,7 +168,7 @@ class ConfigAndPromptTests(unittest.TestCase):
         prompt=llm.call_args.kwargs['messages'][0]['content']
         for phrase in ['Декстер','инженерные','Markdown','фонетической','Не изменяй код','неизвестных']:
             self.assertIn(phrase,prompt)
-        self.assertEqual(env['CHAT_HISTORY'][-1]['content'],response)
+        self.assertEqual(env['dialog_memory'].prepare('', '')[0][1:-1][-1]['content'],response)
         self.assertEqual(tts.call_args.args[1],response)
 
 

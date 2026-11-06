@@ -135,7 +135,7 @@ class LengthTests(unittest.TestCase):
         env.update(CONFIG=NS(tts_normalize_en=True,llm_streaming=True),silero_model=Mock(),
                    stream_reply=Mock(return_value=(raw,{'outcome':'partial_length'})))
         process(Mock(),FRAME,{'mode':'PROCESSING'})
-        self.assertEqual(env['CHAT_HISTORY'],[]);tts.assert_not_called();llmcall.assert_not_called()
+        self.assertEqual(env['dialog_memory'].prepare('', '')[0][1:-1],[]);tts.assert_not_called();llmcall.assert_not_called()
         self.assertTrue(any(raw in str(c.args) and 'ЧАСТИЧНЫЙ' in str(c.args) for c in env['log'].call_args_list))
 
     def test_full_mode_partial_also_does_not_claim_complete_history(self):
@@ -143,7 +143,7 @@ class LengthTests(unittest.TestCase):
         env['CONFIG']=NS(tts_normalize_en=True,llm_streaming=False)
         llmcall.return_value=NS(choices=[NS(message=NS(content='Полученный текст'),finish_reason='length')])
         process(Mock(),FRAME,{'mode':'PROCESSING'})
-        self.assertEqual(env['CHAT_HISTORY'],[]);tts.assert_called_once()
+        self.assertEqual(env['dialog_memory'].prepare('', '')[0][1:-1],[]);tts.assert_called_once()
         options=llmcall.call_args.kwargs
         self.assertEqual(options['max_completion_tokens'],2048)
         self.assertNotIn('extra_body',options);self.assertNotIn('reasoning_format',options)

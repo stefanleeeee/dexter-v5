@@ -3,6 +3,7 @@
 AGENTS.md
 ARCHITECTURE.md
 BASELINE.md
+FOLLOWUP_PLAN.md
 MANIFEST.txt
 PROJECT.md
 PUBLICATION.md
@@ -12,6 +13,7 @@ STATUS.md
 STREAMING.md
 TTS_SETTINGS.md
 cancel_control.py
+dialog_memory.py
 esp32/.gitignore
 esp32/CMakeLists.txt
 esp32/main/CMakeLists.txt
@@ -31,7 +33,12 @@ session_runtime.py
 streaming_reply.py
 test_cancel.py
 test_command_states.py
+test_compact_memory.py
+test_dialog_memory.py
+test_dialog_policy.py
 test_esp_transport.py
+test_followup.py
+test_followup_reader.py
 test_length_handling.py
 test_llm_stream.py
 test_local_config.py

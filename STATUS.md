@@ -1,3 +1,55 @@
+
+Проверка безопасности перед commit: 56 публичных текстовых файлов, полный staged
+ diff и все117 существующих Git-объектов проверены; совпадений известных секретов,
+API/Wi-Fi credentials, персональных путей/данных и reference audio не обнаружено.
+22 проверки ignore прошли; ignore не является единственной защитой. Локальные
+конфигурации сохранены без изменений, модели/аудио/артефакты не включены.
+В рабочем .venv дополнительно прошли221 Python-тест публичной копии (4.445s).
+Проверка actual commit/tag выполняется отдельно до push. Автоматическое сканирование
+не является абсолютной гарантией, результаты относятся к проверенному дереву.
+
+
+## Финальная проверка публикации этапа 4
+
+В подготовленной публичной копии прошли все 304 offline-теста (7.354 s):
+221 Python-тест и 83 C fault-injection теста. Проверены исходники именно release,
+включая esp32/main, без подмены DEXTER_ESP_SOURCE внешней папкой. Существующий
+ESP-IDF build target bootloader+app завершился exit0: app0xca470 bytes,
+21% app-раздела свободно, bootloader0x5280. Источники совпадают с принятой версией4.3.
+Новых аппаратных тестов, Groq вызовов, установок пакетов и прошивки платы нет.
+Фаза5 не реализована. Публикация не меняет рабочий runtime/настройки/прошивку.
+
+## Этап 4 завершён и принят пользователем
+
+Пользователь подтвердил аппаратную приёмку памяти, компактных записей, политики
+длины и безопасного follow-up. В последнем тесте зафиксированы FRESH CAPTURE
+REQUESTED/CONFIRMED, FOLLOWUP WINDOW OPENED/ACCEPTED, успешные уточнения без имени,
+PLAYBACK DONE, WINDOW EXPIRED и ограничение истории шестью парами.
+Это подтверждение владельца, не новый аппаратный тест при публикации. Дополнительные
+Reset/акустические/длительные сценарии не объявляются проверенными без отдельных
+данных. Следующий этап 5 — управление Windows; он не реализован и не начат.
+Эта запись приоритетнее исторических pending/blocked ниже.
+
+Release v0.4.0-dialogue-stable: RAM-only history with whole user/assistant pairs,
+compact marked extracts for long replies, default6 turns/1500 estimated tokens;
+commit only after full stop/done + playback ACK. memory status/clear and version
+guards preserve cancellation/reconnect safety. Approximate history estimate and
+strict byte-level total context budget remain separate. No extra model/API calls.
+
+Natural response length is instructed in the system prompt; explicit detail,
+shortness and sentence-count requests are respected as guidance, not hard cuts.
+Follow-up uses capability0x17/0x18, fresh request/ready0x19/0x1A, full32byte reply ID,
+mic generation/ring/RX reset+drain and300ms acoustic tail guard. Opens12s only after
+fresh READY and worker release, with VAD onset/minimum speech. Legacy firmware
+falls back to wake word. No AEC/barge-in; early/very short speech may be dropped.
+
+Runtime dependencies, model settings/PCM, Silero/Vosk/Whisper/streaming and GPIO
+are preserved. No Windows action handlers or stage5 implementation are included.
+Final publication tests/build and security audit are recorded below. No new
+hardware test, live Groq call or dependency installation is performed for release.
+
+--- Historical phase3 evidence (newer entries above take priority) ---
+
 # Состояние AI Dexter
 
 ## Этапы 1–3 завершены; streaming принят пользователем (2026-11-06)

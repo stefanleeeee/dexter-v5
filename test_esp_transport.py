@@ -32,7 +32,8 @@ def helper_source():
     source = FIRMWARE.read_text(encoding='utf-8-sig')
     start = source.index('// TCP I/O limits:')
     end = source.index('static void tcp_client_task(', start)
-    mic = source[source.index('static uint32_t mic_capture_generation('):source.index('static void mic_i2s_task(')]
+    fresh_globals = source[source.index('// Fresh capture state:'):source.index('i2s_chan_handle_t tx_chan;')]
+    mic = fresh_globals + source[source.index('static uint32_t mic_capture_generation('):source.index('static void mic_i2s_task(')]
     event = source[source.index('static void event_handler('):source.index('void wifi_init_sta(')]
     playback = (FIRMWARE.parent / 'playback.c').read_text(encoding='utf-8-sig')
     header = (FIRMWARE.parent / 'playback.h').read_text(encoding='utf-8-sig')
@@ -94,6 +95,7 @@ class EspTransportTests(unittest.TestCase):
         #define free test_free
         typedef int esp_err_t;
         void *tx_chan;
+        void *rx_chan = (void *)2;
         void *mic_mutex = (void *)1, *audio_ringbuf = (void *)1;
         bool mic_connected;
         uint32_t mic_generation = 1;
@@ -137,6 +139,7 @@ class EspTransportTests(unittest.TestCase):
         int send(int, const void *, size_t, int);
         int recv(int, void *, size_t, int);
         void vTaskDelay(unsigned);
+        int i2s_channel_read(void *, void *, size_t, size_t *, unsigned);
         int i2s_channel_write(void *, const void *, size_t, size_t *, unsigned);
         int i2s_channel_disable(void *);
         int i2s_channel_enable(void *);
@@ -201,6 +204,8 @@ class EspTransportTests(unittest.TestCase):
         bind('xRingbufferReceiveUpTo', C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.POINTER(C.c_size_t), C.c_uint, C.c_size_t), 'ring_receive_up_to')
         bind('vRingbufferReturnItem', C.CFUNCTYPE(None, C.c_void_p, C.c_void_p), 'ring_return')
         bind('xRingbufferSend', C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p, C.c_size_t, C.c_uint), 'ring_send')
+        bind('i2s_channel_read', C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p,
+             C.c_size_t, C.POINTER(C.c_size_t), C.c_uint), 'mic_read')
         bind('i2s_channel_write', C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p,
              C.c_size_t, C.POINTER(C.c_size_t), C.c_uint), 'write')
         cls.engine = llvm.create_mcjit_compiler(module, target)
@@ -246,7 +251,18 @@ class EspTransportTests(unittest.TestCase):
         cls.play_cancel = staticmethod(C.CFUNCTYPE(C.c_bool, C.c_void_p)(cls.engine.get_function_address('playback_cancel')))
         cls.cancel_ack = staticmethod(C.CFUNCTYPE(C.c_bool, C.c_void_p)(cls.engine.get_function_address('playback_take_cancel_ack')))
 
+    def mic_read(self, channel, data, size, received, timeout):
+        self.now_us += 20000
+        self.mic_read_calls += 1
+        received[0] = size if self.mic_read_result == 0 else 0
+        return self.mic_read_result
+
     def setUp(self):
+        for flag in ['mic_fresh_phase','mic_fresh_sticky_error','followup_probe_pending','fresh_pending','fresh_done_valid']:
+            ctype = C.c_uint if flag == 'mic_fresh_phase' else C.c_bool
+            ctype.from_address(self.engine.get_global_value_address(flag)).value = 0
+        self.mic_read_calls = 0
+        self.mic_read_result = 0
         type(self).current = self
         self.sent, self.played = bytearray(), bytearray()
         self.send_steps, self.recv_steps, self.write_steps = [], [], []
@@ -1342,6 +1358,116 @@ class EspTransportTests(unittest.TestCase):
         self.assertNotEqual(self.play_bind(None), 0)
         self.dma_bytes, self.dma_register_result = 2880, 1
         self.assertEqual(self.play_bind(None), 1)
+
+    def fresh_call(self, name, restype=None, *args):
+        proto = C.CFUNCTYPE(restype, *([C.c_int] if args else []))
+        return proto(self.engine.get_function_address(name))(*args)
+
+    def fresh_global(self, name, ctype=C.c_bool):
+        return ctype.from_address(self.engine.get_global_value_address(name))
+
+    def fresh_request(self, token=b'a'*32):
+        self.set_connected(True)
+        C.memmove(self.engine.get_global_value_address('fresh_done_token'), token, 32)
+        self.fresh_global('fresh_done_valid').value = True
+        self.incoming.extend(token)
+        self.assertEqual(self.handle(7,b'\x19\0\0\0\x20'),0)
+        self.assertEqual(self.control_poll(7),1)
+        return token
+
+    def test_fresh_capability_reply_is_solicited_zero_length(self):
+        self.assertEqual(self.handle(7,b'\x17\0\0\0\0'),0)
+        self.assertEqual(self.fresh_call('tcp_send_followup',C.c_int,7),0)
+        self.assertEqual(self.sent,b'\x18\0\0\0\0')
+        self.assertEqual(self.mic_read_calls,0)
+
+    def test_fresh_request_discards_ring_and_invalidates_inflight_generation(self):
+        self.set_connected(True);old=self.capture();self.enqueue(b'old!',4,old)
+        self.assertTrue(self.fresh_call('mic_request_fresh',C.c_bool))
+        self.assertEqual(self.queue,[]);self.assertNotEqual(self.mic_epoch.value,old)
+        self.assertEqual(self.capture(),0);self.enqueue(b'old!',4,old)
+        self.assertEqual(self.queue,[])
+
+    def test_fresh_producer_drains_dma_then_pauses_until_network_ready(self):
+        self.set_connected(True);self.assertTrue(self.fresh_call('mic_request_fresh',C.c_bool))
+        self.fresh_call('mic_service_fresh')
+        self.assertEqual(self.fresh_call('mic_fresh_status',C.c_uint),2)
+        self.assertGreaterEqual(self.mic_read_calls,4)
+        self.assertEqual(self.channel_ops,['disable','enable'])
+        self.assertEqual(self.capture(),0)
+        self.fresh_call('mic_fresh_release');generation=self.capture()
+        self.assertNotEqual(generation,0);self.enqueue(b'new!',4,generation)
+        self.assertEqual(bytes(self.queue[0].raw),b'new!')
+
+    def test_fresh_confirmation_precedes_release_and_echoes_full_id(self):
+        token=self.fresh_request()
+        self.assertEqual(self.fresh_call('tcp_send_followup',C.c_int,7),0)
+        self.assertEqual(self.sent,b'');self.fresh_call('mic_service_fresh')
+        self.assertEqual(self.capture(),0)
+        self.assertEqual(self.fresh_call('tcp_send_followup',C.c_int,7),0)
+        self.assertEqual(self.sent,b'\x1a\0\0\0\x20'+token)
+        self.assertNotEqual(self.capture(),0)
+
+    def test_fresh_stale_request_does_not_change_generation(self):
+        self.set_connected(True);generation=self.capture()
+        self.incoming.extend(b'x'*32)
+        self.assertEqual(self.handle(7,b'\x19\0\0\0\x20'),0)
+        self.assertEqual(self.control_poll(7),1)
+        self.assertEqual(self.capture(),generation)
+        self.assertFalse(self.fresh_global('fresh_pending').value)
+
+    def test_fresh_request_id_is_single_use(self):
+        token=self.fresh_request();generation=self.mic_epoch.value
+        self.incoming.extend(token)
+        self.assertEqual(self.handle(7,b'\x19\0\0\0\x20'),0)
+        self.assertEqual(self.control_poll(7),1)
+        self.assertEqual(self.mic_epoch.value,generation)
+
+    def test_fresh_rx_reset_failure_is_sticky_without_false_ready(self):
+        self.fresh_request();self.disable_result=1
+        self.fresh_call('mic_service_fresh')
+        self.assertEqual(self.fresh_call('tcp_send_followup',C.c_int,7),-1)
+        self.assertEqual(self.sent,b'');self.assertTrue(self.fresh_global('mic_fresh_sticky_error').value)
+        self.set_connected(False);self.set_connected(True)
+        self.assertFalse(self.fresh_call('mic_request_fresh',C.c_bool))
+
+    def test_fresh_zero_reads_timeout_and_pending_has_absolute_deadline(self):
+        self.fresh_request();self.mic_read_result=0x107
+        self.fresh_call('mic_service_fresh')
+        self.assertLessEqual(self.mic_read_calls,51)
+        self.assertEqual(self.fresh_call('tcp_send_followup',C.c_int,7),-1)
+        self.assertEqual(self.sent,b'')
+
+    def test_fresh_disconnect_during_producer_drain_cannot_confirm_old_epoch(self):
+        self.fresh_request();original=self.mic_read
+        def read(*args):
+            result=original(*args)
+            if self.mic_read_calls==1:self.set_connected(False);self.set_connected(True)
+            return result
+        self.mic_read=read;self.fresh_call('mic_service_fresh')
+        self.assertEqual(self.fresh_call('mic_fresh_status',C.c_uint),0)
+        self.assertEqual(self.sent,b'')
+
+    def test_fresh_ready_partial_send_failure_does_not_release_capture(self):
+        self.fresh_request();self.fresh_call('mic_service_fresh')
+        self.send_steps=[5,(-1,104)]
+        self.assertEqual(self.fresh_call('tcp_send_followup',C.c_int,7),-1)
+        self.assertEqual(self.capture(),0)
+
+    def test_fresh_rx_driver_calls_are_outside_mic_mutex(self):
+        self.fresh_request();disable=self.i2s_disable;read=self.mic_read;violations=[]
+        def checked_disable(*args):
+            violations.append(self.lock.locked());return disable(*args)
+        def checked_read(*args):
+            violations.append(self.lock.locked());return read(*args)
+        self.i2s_disable=checked_disable;self.mic_read=checked_read
+        self.fresh_call('mic_service_fresh')
+        self.assertTrue(violations);self.assertFalse(any(violations))
+        self.assertEqual(self.fresh_call('mic_fresh_status',C.c_uint),2)
+
+    def test_fresh_control_wrong_body_length_is_rejected(self):
+        self.assertEqual(self.handle(7,b'\x19\0\0\0\x1f'),-1)
+        self.assertFalse(self.fresh_global('fresh_pending').value)
 
 
 if __name__ == '__main__':
