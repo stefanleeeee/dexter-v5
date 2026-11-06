@@ -9,6 +9,7 @@ PUBLICATION.md
 README.md
 ROADMAP.md
 STATUS.md
+TTS_SETTINGS.md
 cancel_control.py
 esp32/.gitignore
 esp32/CMakeLists.txt
@@ -31,3 +32,6 @@ test_pcm_edges.py
 test_playback_ack.py
 test_reconnect_timeouts.py
 test_session_runtime.py
+test_tts_upgrade.py
+tts_text_normalizer.py
+voice_settings.py

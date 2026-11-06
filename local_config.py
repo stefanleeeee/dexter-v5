@@ -11,6 +11,9 @@ class Config:
     api_key: str
     host: str
     port: int
+    tts_model: str = 'v5_6_ru'
+    tts_voice: str = 'aidar'
+    tts_normalize_en: bool = True
 
 
 def load_config(path=None, environ=None):
@@ -25,7 +28,7 @@ def load_config(path=None, environ=None):
                     continue
                 key, separator, value = line.partition('=')
                 key, value = key.strip(), value.strip()
-                if not separator or key not in {'GROQ_API_KEY', 'HOST', 'PORT'}:
+                if not separator or key not in {'GROQ_API_KEY', 'HOST', 'PORT', 'TTS_MODEL', 'TTS_VOICE', 'TTS_NORMALIZE_EN'}:
                     raise ValueError('Invalid .env entry; use the supplied .env.example')
                 if value.startswith('"'):
                     value = json.loads(value)
@@ -38,7 +41,7 @@ def load_config(path=None, environ=None):
                 values[key] = value
     except (OSError, UnicodeError, ValueError):
         raise ValueError('Cannot read local .env; check format and permissions') from None
-    values.update({key: env[key] for key in ('GROQ_API_KEY', 'HOST', 'PORT') if key in env})
+    values.update({key: env[key] for key in ('GROQ_API_KEY', 'HOST', 'PORT', 'TTS_MODEL', 'TTS_VOICE', 'TTS_NORMALIZE_EN') if key in env})
     api_key = values.get('GROQ_API_KEY', '').strip()
     if not api_key or api_key == 'YOUR_GROQ_API_KEY':
         raise ValueError('Set GROQ_API_KEY in the environment or local .env')
@@ -51,7 +54,16 @@ def load_config(path=None, environ=None):
             raise ValueError()
     except (ValueError, TypeError):
         raise ValueError('PORT must be an integer between 1 and 65535') from None
-    return Config(api_key, host, port)
+    model = values.get('TTS_MODEL', 'v5_6_ru').strip()
+    if model not in {'v4_ru', 'v5_6_ru'}:
+        raise ValueError('TTS_MODEL must be v4_ru or v5_6_ru')
+    voice = values.get('TTS_VOICE', 'aidar').strip().casefold()
+    if not re.fullmatch(r'[a-z][a-z0-9_]*', voice):
+        raise ValueError('Invalid TTS_VOICE; use voice list to see available speakers')
+    normalize = values.get('TTS_NORMALIZE_EN', 'true').strip().casefold()
+    if normalize not in {'true', 'false', '1', '0'}:
+        raise ValueError('TTS_NORMALIZE_EN must be true/false or 1/0')
+    return Config(api_key, host, port, model, voice, normalize in {'true', '1'})
 
 
 def redact_log(message, config):

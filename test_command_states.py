@@ -23,6 +23,11 @@ FRAME = b'\0' * 960
 
 def load_function(name, namespace, command_limit=None):
     namespace.setdefault('CommandCancelled', CommandCancelled)
+    from tts_text_normalizer import normalize_tts_text, remaining_latin_count
+    namespace.setdefault('normalize_tts_text', normalize_tts_text)
+    namespace.setdefault('remaining_latin_count', remaining_latin_count)
+    namespace.setdefault('voice_settings', NS(snapshot=lambda: 'aidar'))
+    namespace.setdefault('CONFIG', NS(tts_normalize_en=True))
     tree = ast.parse(SOURCE.read_text(encoding='utf-8-sig'))
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
     if command_limit is not None:

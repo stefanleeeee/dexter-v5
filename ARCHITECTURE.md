@@ -1,5 +1,18 @@
 # Фактическая архитектура Dexter
 
+## Accepted Phase 2 — Silero V5.6
+
+The active default TTS is Silero v5_6_ru, CPU/4 threads, raw PCM16LE mono24000Hz.
+VoiceSettings snapshots one speaker for a complete TTS reply. The existing console
+reader handles voice list/status/name and cancel. The stdlib-only phonetic
+normalizer transforms a TTS copy, preserving original LLM history and protected
+literals. Known names get reviewed Cyrillic spellings; unknown Latin is retained.
+Groq's system prompt has the same scope. Local config selects model/voice and
+normalizer flag. Single socket reader/writer, ACK/CANCEL, playback IDs, pipeline
+lock and ESP firmware remain as in phase1. LLM/TTS streaming is not implemented;
+it is planned for phase3. The owner has accepted phase2; older status snapshots
+below are historical. See TTS_SETTINGS.md and STATUS.md.
+
 ## Уточнение baseline 1.9 — 2026-11-06
 
 Рабочий тракт не менялся. .venv 3.14.3/Vosk/Silero проверены локальным smoke, PATH Python отличается; запускать явно .venv из корня проекта. Torch CPU-only; текущие hardware/version/hash/RTF и пределы доказательств — BASELINE.md и <private baseline JSON; intentionally excluded>. pressure считает повторные неудачные enqueue с сохранением PCM, mic_drop — failed mic enqueue при connected generation, не намеренный disconnected discard. Пользователь подтвердил короткий DONE/длинный CANCELLED 1.8, не полный длинный ответ; Reset при cancel/сквозные замеры остаются открыты. Новые документы имеют приоритет над историческими статусами ниже, параметры моделей/PCM/ACK не менялись.

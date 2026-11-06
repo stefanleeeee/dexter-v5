@@ -4,7 +4,8 @@ import threading
 
 
 class CancelControl:
-    def __init__(self, log, stream=None):
+    def __init__(self, log, stream=None, voices=None):
+        self.voices = voices
         self.log = log
         self.stream = stream if stream is not None else sys.stdin
         self._lock = threading.Lock()
@@ -25,9 +26,13 @@ class CancelControl:
             for line in self.stream:
                 if line.strip().casefold() in ('cancel', 'отмена'):
                     if not self.cancel_current(): self.log('[CANCEL] No active command')
+                elif self.voices is not None and line.strip().casefold().split(maxsplit=1)[0:1] == ['voice']:
+                    parts = line.strip().split(maxsplit=1)
+                    self.voices.command(parts[1] if len(parts) == 2 else '', self.log)
         except (OSError, ValueError):
             self.log('[CANCEL] Console input unavailable; programmatic control remains available')
 
     def start(self):
         threading.Thread(target=self.run, name='dexter-cancel-console', daemon=True).start()
         self.log('[CONTROL] Type cancel or отмена + Enter to cancel the current response')
+        if self.voices is not None: self.log('[CONTROL] voice list | voice status | voice <name>')

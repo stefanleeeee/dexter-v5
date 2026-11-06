@@ -1,16 +1,16 @@
-# AI Dexter — stable phase 1
+# AI Dexter — Phase 2 New TTS (Silero V5.6)
 
-A voice assistant using an ESP32-S3 microphone/speaker and a Python server. Vosk detects “Декстер”; Groq provides command transcription and LLM replies; local Silero synthesizes Russian speech. Internet and a Groq API key are required for STT/LLM. CosyVoice, voice barge-in, Windows actions and acoustic echo cancellation are not implemented.
+A voice assistant using an ESP32-S3 microphone/speaker and a Python server. Vosk detects “Декстер”; Groq provides command transcription and LLM replies; local Silero V5.6 synthesizes Russian speech on CPU. Phase 2 is accepted; Phase 3 streaming is not implemented. Internet and a Groq API key are required for STT/LLM. CosyVoice, voice barge-in, Windows actions and acoustic echo cancellation are not implemented.
 
 ## Architecture
 
-ESP I2S microphone → PCM16LE mono 16 kHz → TCP → Python/Vosk wake word → Groq Whisper STT → Groq LLM → Silero aidar → PCM16LE mono 24 kHz → TCP → bounded ESP playback queue → I2S speaker.
+ESP I2S microphone → PCM16LE mono 16 kHz → TCP → Python/Vosk wake word → Groq Whisper STT → Groq LLM → Silero V5.6 (selectable voice) → PCM16LE mono 24 kHz → TCP → bounded ESP playback queue → I2S speaker.
 
 TCP: 5-byte header `[type:u8][length:u32 big-endian]`; raw PCM, no WAV headers. MIC 0x02, START 0x11, PCM 0x12, EOS 0x13, DONE 0x14, CANCEL 0x15, CANCELLED 0x16. Control IDs are 32 bytes (connection UUID + counter). Update server/ESP as a matched pair. DONE follows DMA drain; cancellation clears software/DMA output before CANCELLED. See ARCHITECTURE.md.
 
 ## Python setup (Windows / PowerShell)
 
-The recorded working environment is CPython 3.14.3, CPU-only torch 2.15.0. The exact installed dependency snapshot is requirements.txt; other platforms/version combinations are not yet validated.
+The recorded working environment is CPython 3.14.3, CPU-only torch 2.15.0. The exact installed dependency snapshot is requirements.txt; other platforms/version combinations are not yet validated. If the Windows py launcher is unavailable, use the executable of your installed CPython 3.14 to create the virtual environment; do not substitute an unrelated PATH interpreter silently.
 
 ```powershell
 py -3.14 -m venv .venv
@@ -20,7 +20,25 @@ Copy-Item .env.example .env
 
 Edit `.env`: set `GROQ_API_KEY`, listening `HOST` (normally `0.0.0.0`) and `PORT`. OS environment variables override .env. No python-dotenv dependency is needed. Only KEY=VALUE lines, whole-line comments, literal values, single-quoted strings or JSON double-quoted strings are supported; there is no variable interpolation or inline comment syntax. Never commit the filled file. Invalid/missing required configuration fails without printing its value. Normal logs redact configured API keys and IPv4 addresses, but recognized speech/LLM content remains private user data; inspect logs before sharing.
 
-Place a Russian Vosk model directory at `model_ru/` and the trusted Silero package file at `v4_ru.pt`, next to server.py. Weights/audio are intentionally not included. Sources: [Vosk model catalog](https://alphacephei.com/vosk/models), [Silero models](https://github.com/snakers4/silero-models). Use the corresponding Russian Vosk model and Silero v4_ru package, respect their licenses, and compare model hashes with your own trusted source. Exact model tree/weight hashes from the tested baseline are in BASELINE.md. Loading a torch package executes package code: only use trusted weights.
+Place a trusted Russian Vosk model directory at `model_ru/` and **the official
+Silero package at `v5_6_ru.pt` in the repository root, next to `server.py`**.
+They are local prerequisites, not included in Git. Sources:
+[Vosk model catalog](https://alphacephei.com/vosk/models),
+[Silero model manifest](https://github.com/snakers4/silero-models/blob/e382298387332f2bf461fe6eadfde99104611b0c/models.yml).
+The official Silero file URL is `https://models.silero.ai/models/tts/ru/v5_6_ru.pt`.
+Respect model licenses. Loading a torch package executes package code: use a
+trusted source and preserve provenance. The tested package size is 147664410
+bytes, SHA256 `04cc9b1d08ce38bcaa9d02c488d80d3e6806d17f7eaa7c95982f36a3cbf50b2e`;
+this is a recorded local hash, not an independently published signed checksum.
+The server does not download weights automatically and fails if the selected
+file is missing. Do not substitute a desktop installer or a different `.bin`.
+
+The safe `.env.example` selects `TTS_MODEL=v5_6_ru`, `TTS_VOICE=aidar` and
+`TTS_NORMALIZE_EN=true`. Set the startup speaker and normalization locally.
+For optional V4 rollback, provide your own trusted `v4_ru.pt`, set
+`TTS_MODEL=v4_ru` and restart. Both models are excluded from Git. Do not load both
+models at once. Python/PyTorch dependencies have not been changed for this release.
+
 
 Start from the repository root:
 
@@ -29,6 +47,15 @@ Start from the repository root:
 ```
 
 The server listens on the configured port. Configure firewall/LAN access for the ESP. TCP is plain, unauthenticated LAN transport; do not expose it directly to the public internet. Type `cancel` or `отмена` + Enter in the server console to cancel the current response. In-flight model calls finish naturally; their canceled results are not sent. No microphone voice interruption is implemented.
+
+Use `voice list`, `voice status`, or `voice eugene` / `voice aidar` /
+`voice kseniya` / `voice baya` / `voice xenia`. Switching does not reload the model
+or change the voice mid-response. Console selection is session-local; model
+selection requires a restart. Known English technical names are adapted only in
+a TTS copy (for example Python → Пайтон, GitHub → Гитхаб). Unknown Latin and
+protected literals are retained; their pronunciation is not guaranteed.
+See [TTS_SETTINGS.md](TTS_SETTINGS.md) for limits and rollback.
+
 
 ## ESP32-S3 setup
 
@@ -53,11 +80,25 @@ Wiring: microphone I2S1, BCLK=4, WS=5, DIN=6, 16 kHz / left 32-bit slot converte
 Offline tests do not import server.py or call real models/cloud APIs. C tests execute extracted firmware functions with a fake SDK through clang and llvmlite. Install requirements-dev.txt only if you want these development tests. Make clang (LLVM compatible with llvmlite 0.47) available in PATH or set DEXTER_ESP_CLANG to its executable. The test fixture can also use DEXTER_ESP_SOURCE for another source tree.
 
 ```powershell
-python -B -m unittest -q test_command_states test_session_runtime test_esp_transport test_reconnect_timeouts test_playback_ack test_cancel test_pcm_edges test_local_config
+python -B -m unittest -q test_command_states test_session_runtime test_esp_transport test_reconnect_timeouts test_playback_ack test_cancel test_pcm_edges test_local_config test_tts_upgrade
 ```
 
-Tests needing clang/llvmlite require both tools; a missing dependency is not a passing firmware test. The original 136 regression tests cover states, framing, timeouts, ACK/CANCEL, PCM and long text; configuration tests are added for this release. See STATUS.md/PUBLICATION.md for actual results.
+Tests needing clang/llvmlite require both tools; a missing dependency is not a passing firmware test. 165 tests cover states, framing, timeouts, ACK/CANCEL, PCM/long text, configuration, voice switching/concurrency, phonetic normalization and prompt/history preservation. See STATUS.md/PUBLICATION.md for actual results.
 
 ## Evidence and limits
 
 PROJECT.md describes scope; ROADMAP.md planned work; ARCHITECTURE.md implementation; STATUS.md actual checks; BASELINE.md measurements. Historical snapshot paragraphs are preserved, so newest evidence takes priority. Model timing is a small local diagnostic sample, not a latency guarantee. GPIO/device characteristics and runtime install compatibility still require per-machine verification. No automatic credential rotation was performed. Keep local backups outside the repository.
+
+## Stable recovery point
+
+The accepted New TTS milestone is tagged `v0.2.0-tts-stable`. To inspect/recover
+it without overwriting a current worktree with local changes, use:
+
+```powershell
+git fetch origin tag v0.2.0-tts-stable
+git worktree add --detach ../dexter-v0.2.0 v0.2.0-tts-stable
+```
+
+The new worktree still needs its own ignored `.env`, ESP local configuration and
+trusted weights. Local configuration/model files are not restored by Git. Preserve
+any existing settings separately; do not use reset --hard or force push to roll back.

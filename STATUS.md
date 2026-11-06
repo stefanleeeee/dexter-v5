@@ -1,5 +1,21 @@
 # Состояние AI Dexter
 
+## Этап 2 — New TTS завершён и принят (2026-11-06)
+
+Пользователь подтвердил завершение и приёмку этапа 2. Эта отметка имеет приоритет над прежними сообщениями об ожидаемом прослушивании/сетевом блокере. Подготовлена точка восстановления `v0.2.0-tts-stable`; этап 3 — потоковый голосовой ответ LLM → TTS → ESP32 — следующий, ещё не реализован. CosyVoice не интегрирована, текущий движок — Silero.
+
+Silero v5_6_ru выбрана в конфигурации по умолчанию, CPU/4 threads, aidar, PCM16LE mono24000Hz. Модель предоставляется локально как v5_6_ru.pt рядом с server.py; веса не входят в Git. Проверенный файл147664410 bytes, SHA25604cc9b1d08ce38bcaa9d02c488d80d3e6806d17f7eaa7c95982f36a3cbf50b2e. Источник подтверждён владельцем как models.silero.ai; ZIP CRC/torch.package resource/встроенный Python и pickle globals были проверены до загрузки. Это локальный идентификатор, не независимо опубликованный signed checksum. Runtime голоса: aidar, baya, kseniya, eugene, xenia; все синтезированы на CPU. CUDA не использовалась.
+
+Консоль voice list/status/<имя> использует существующий reader вместе с cancel. Голос фиксируется на весь TTS-ответ; переключение не перезагружает модель. Локальные настройки: TTS_MODEL=v5_6_ru, TTS_VOICE=aidar, TTS_NORMALIZE_EN=true. Env имеет приоритет над .env. Возврат к V4: предоставить собственный доверенный v4_ru.pt, выбрать TTS_MODEL=v4_ru и перезапустить. Старые локальные модели/конфигурации публикацией не переносятся и не удаляются.
+
+tts_text_normalizer адаптирует 15 известных английских терминов только в копии для TTS; границы/регистр, идемпотентность и сохранение защищённых URL/email/путей/файлов/кода/распознанных команд проверены. Unknown Latin сохраняется, новый diagnostic содержит лишь count. Это не универсальный parser произвольного непомеченного кода и не гарантия чтения неизвестной латиницы. Системный промпт Groq содержит согласованное фонетическое правило, исходный ответ/история не переписываются. Живые платные проверки LLM не проводились; аргументы API проверены mock.
+
+Результаты CPU V5.6: load2.723s; после прогрева короткий0.191s/3.10s audio (RTF0.062), средний1.062s/18.21s (RTF0.058), длинный4.558s/87.60s (RTF0.052). Peak working set около792MiB в TTS-only процессе без Vosk. Все14 synthesis runs дали mono/finite output, без NaN/Inf/выхода за единичную амплитуду в этом наборе; transport clipping сохранён. Это малый диагностический sample, не SLA или контролируемое сравнение с V4.
+
+165 offline тестов охватывают states, framing, reconnect/deadlines, ACK/CANCEL, PCM/длинный текст, voice concurrency, normalizer, configuration/rollback и Groq prompt/history. Отдельный предыдущий loopback проверял настоящую V5.6 через unchanged sender/CommandSession с программным ESP peer: normal DONE, CANCELLED без ложного DONE, разные IDs, возврат WAKE_WORD. Это программный тест, не I2S. Приёмка этапа 2 владельцем сообщена отдельно; новых аппаратных действий агент при публикации не выполнял.
+
+В release переносятся только актуальные исходники/тесты/безопасный .env.example и документация. Рабочие локальные конфиги не перезаписываются; ESP firmware, TCP, buffers, model parameters и зависимости публикацией не меняются. Прошивка не пересобиралась: её файлы идентичны phase1 baseline. Чистая установка зависимостей на другом компьютере не выполнялась; инструкции предполагают собственные локальные доверенные веса. Полный file manifest — MANIFEST.txt, аудит публикации — PUBLICATION.md.
+
 ## Public baseline preparation — 2026-11-06
 
 The owner confirms phase 1 tasks 1.1–1.9 are complete and hardware long playback, ACK, CANCEL, next command and TCP recovery work. This newer report supersedes older acceptance-status paragraphs below. New detailed end-to-end timings and a distinct Reset-during-cancel check were not supplied.
@@ -342,3 +358,5 @@ CosyVoice, потоковая подача текста/генерация от�
 ## Что обновлять дальше
 
 После каждой проверенной работы: номер задачи, изменённое поведение, реально выполненные проверки, результат, ограничения, оставшиеся проблемы и следующий шаг. Не отмечать этап завершённым по одному патчу; не заменять фактические измерения плановыми значениями.
+
+Publication check (Phase2): release-copy unittest discovery passed all165 tests; source/syntax and local-model layout checked. Existing local configs/ESP firmware/dependency pins unchanged. No fresh online dependency installation or new hardware test was performed for publication.

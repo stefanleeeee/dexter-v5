@@ -17,6 +17,8 @@ from groq import Groq
 from session_runtime import CommandSession, CommandCancelled
 from cancel_control import CancelControl
 from local_config import load_config, redact_log
+from tts_text_normalizer import normalize_tts_text, remaining_latin_count
+from voice_settings import VoiceSettings
 
 # === НАСТРОЙКИ ===
 try:
@@ -46,7 +48,7 @@ log("[INIT] Дежурный контур готов к поиску имени 
 log("[INIT] Загрузка локальной нейросети Silero TTS...")
 device = torch.device('cpu')
 torch.set_num_threads(4)
-local_file = 'v4_ru.pt'
+local_file = CONFIG.tts_model + '.pt'
 
 if not os.path.isfile(local_file):
     log(f"[ОШИБКА] Файл '{local_file}' не найден в папке со скриптом!")
@@ -54,12 +56,20 @@ if not os.path.isfile(local_file):
 
 silero_model = torch.package.PackageImporter(local_file).load_pickle("tts_models", "model")
 silero_model.to(device)
+voice_settings = VoiceSettings(CONFIG.tts_model, silero_model.speakers, CONFIG.tts_voice)
+log(f"[TTS] Model={CONFIG.tts_model}, speaker={voice_settings.snapshot()}, CPU, 24000 Hz, normalization={CONFIG.tts_normalize_en}")
 log("[INIT] Голосовой движок успешно загружен в ОЗУ!")
 
 def send_audio_to_esp32(conn, text_response, session_id=""):
     log(f"[{session_id}] [TTS] Синтез речи (Silero TTS)...")
     t_tts_start = time.time()
     try:
+        # Freeze the speaker for this whole reply; console changes affect the next one.
+        speaker = voice_settings.snapshot()
+        text_response = normalize_tts_text(text_response, enabled=CONFIG.tts_normalize_en)
+        remaining = remaining_latin_count(text_response)
+        if remaining:
+            log(f"[TTS TEXT] {remaining} Latin fragments retained (including protected literals); pronunciation is not guaranteed")
         text_response = text_response.replace('\n', ' ').strip()
         # Bound each model call without dropping the remainder of a long sentence.
         sentences = []
@@ -77,7 +87,7 @@ def send_audio_to_esp32(conn, text_response, session_id=""):
             conn.check_active()
             if not sentence.strip(): continue
                 
-            tensor = silero_model.apply_tts(text=sentence, speaker='aidar', sample_rate=24000)
+            tensor = silero_model.apply_tts(text=sentence, speaker=speaker, sample_rate=24000)
             samples = np.asarray(tensor.numpy())
             if samples.ndim != 1 or samples.size == 0 or not np.isfinite(samples).all():
                 raise ValueError('Invalid TTS audio: expected nonempty finite mono samples')
@@ -161,7 +171,7 @@ def process_command(conn, audio_bytes, state, session=None):
             log(f"[{session_id}] [GROQ LLM] Генерация ответа (OpenAI GPT-OSS-120b)...")
             t_llm_start = time.time()
             messages = [
-                {"role": "system", "content": "Ты — голосовой ассистент Декстер. Давай глубокие инженерные ответы, но при просьбах говорить коротко — отвечай предельно кратко. Запрещено использовать Markdown (*, #, -, списки). Генерируй только сплошной текст. Все числа пиши словами."}
+                {"role": "system", "content": "Ты — голосовой ассистент Декстер. Давай глубокие инженерные ответы, но при просьбах говорить коротко — отвечай предельно кратко. Запрещено использовать Markdown (*, #, -, списки). Генерируй только сплошной текст. Все числа пиши словами в обычной речи, сохраняя точные технические данные. Ответ озвучивается русским синтезатором: известные английские названия и сокращения передавай понятной русской фонетической записью, например Python — Пайтон, GitHub — Гитхаб, Windows — Виндоус, Wi-Fi — Вай-фай, NVIDIA — Энвидиа, API — Эй-пи-ай. Не пропускай названия и не подменяй понятия. Не используй латиницу в обычной речи при однозначной фонетической записи. Не выдумывай произношение неизвестных названий. Не изменяй код, URL, email, пути, команды, имена файлов, точные идентификаторы и числа в них ради произношения."}
             ]
             for msg in CHAT_HISTORY[-4:]: messages.append(msg)
             messages.append({"role": "user", "content": user_text})
@@ -354,6 +364,6 @@ def start_server(control=None):
                 log(f"[ОШИБКА СЕРВЕРА] {e}")
 
 if __name__ == "__main__":
-    cancel_control = CancelControl(log)
+    cancel_control = CancelControl(log, voices=voice_settings)
     cancel_control.start()
     start_server(cancel_control)

@@ -2,7 +2,7 @@
 
 Preserve the existing voice pipeline: microphone PCM16LE mono16k → Vosk wake word → Groq STT/LLM → Silero aidar24k → ESP32 I2S. Do not import server.py in offline tests: import loads models and initializes the cloud client.
 
-Read PROJECT.md, ROADMAP.md, STATUS.md and ARCHITECTURE.md before work. Historical snapshots are retained; newest status takes priority. Phase 1 tasks 1.1–1.9 are implemented. CosyVoice is not integrated.
+Read PROJECT.md, ROADMAP.md, STATUS.md and ARCHITECTURE.md before work. Historical snapshots are retained; newest status takes priority. Phase 1 tasks 1.1–1.9 and Phase 2 New TTS (Silero V5.6 CPU, voice console, phonetic adaptation) are implemented and accepted. Phase 3 streaming is next and not implemented. CosyVoice is not integrated.
 
 CommandSession owns each connection, one worker writer, one socket reader, a global pipeline lock, generation/UUID and full response IDs. Preserve cancellation and stale-result guards. Never confuse send complete, queue empty and I2S completion. ESP playback consumer alone calls I2S; never hold its mutex during driver calls. Do not change PCM/rates/I2S/queue size casually.
 
