@@ -1,5 +1,7 @@
 # Дорожная карта AI Dexter
 
+Актуальнаяприёмка2026-11-06: **этапы1,2,3 завершены иприняты**, рабочаяTTS — SileroV5.6CPU, streamingstablev0.3.0. **Этап4 — следующий,не реализован**. Записьприоритетнеестарыхpendingстатусовниже; публикацияне начинаетэтап4.
+
 Актуальный принятый этап (2026-11-06): **этап 2 New TTS завершён — Silero V5.6 CPU**. Следующий этап3 — потоковый голосовой ответ, **ещё не реализован**. Эта запись приоритетнее исторических планов/статусов ниже; CosyVoice не внедрена. Публикация stable milestone не начинает streaming.
 
 Publication update (2026-11-06): owner confirms 1.1–1.9 complete and long playback/ACK/CANCEL/next command/TCP recovery hardware-tested. Newer than historical statuses below. Public baseline preparation is separate; phase 2 is not started. Detailed new end-to-end timing data and a distinct Reset-during-cancel check were not supplied.
@@ -45,21 +47,19 @@ Publication update (2026-11-06): owner confirms 1.1–1.9 complete and long play
 
 Точка восстановления: аннотированный тег `v0.2.0-tts-stable`. Ни веса, ни локальные секреты не входят в репозиторий.
 
-## Этап 3 — потоковый голосовой ответ (следующий, ещё не реализован)
+## Этап 3 — Streaming Voice Responses (завершён, принят пользователем)
 
-Зависимость: принятый этап 2. Начинать только по отдельному заданию. Сейчас LLM и TTS формируют полный ответ до передачи; существующая отправка PCM блоками не считается streaming генерацией.
+Реализованы3.1–3.6: Groq streaming, bounded фразы, последовательный Silero V5.6 CPU,
+PCM playback иbackpressure, singleSTART/EOS/ACK/CANCEL, partial_length/empty_length,
+usage/диагностика иfull-responsefallback. Автоматическийнабор224 tests.
+Пользовательподтвердилкороткие/длинныеответычерезESP32,первуюпередачупримерно0.6–1.2s
+послеLLMstart,полныйответна10предложений/~110sаудиосоstop/done/PLAYBACKDONE.
+Не приписывать этомуотчётунепредоставленныеновыеReset/stall измерения.
+Defaultstreamingtrue, бюджет2048/effortlow/include_reasoningfalse; все4параметра
+вREADME. NativeTTSaudio-out/двустороннийspeech-to-speech/AECне реализованы.
+Stabletag: v0.3.0-streaming-stable. Подробности STATUS.md/STREAMING.md.
 
-| Планируемая задача | Будущий результат / проверка |
-| --- | --- |
-| 3.1 Выбрать границы streaming | Отдельно LLM text-in, сегментация и TTS audio-out; не называть нарезку готового WAV потоковым синтезом |
-| 3.2 Подать текст постепенно | Границы слов/предложений, нормализатор, отсутствие дублей/пропусков, сохранение literal identifiers |
-| 3.3 Связать генерацию и PCM transport | Ограниченная очередь, prebuffer/backpressure, отсутствие неограниченного накопления |
-| 3.4 Сохранить завершение и отмену | Полные IDs, EOS/ACK/CANCEL, disconnect и устаревшие результаты на разных границах |
-| 3.5 Принять качество и ресурсы | Измерить первый звук/RTF/потери/heap, короткие и длинные аппаратные ответы, полный режим как fallback |
-
-Критерий выхода: только после реализации, автоматических и аппаратных проверок. Voice barge-in/AEC не возникают автоматически из TCP streaming. Реализация этапа 3 в этом релизе отсутствует.
-
-## Этап 4 — развитие голосового общения
+## Этап 4 — контекст диалога и естественное общение (следующий; не реализован)
 
 Зависимость: этап 3. Цель: предсказуемый разговор без неконтролируемой памяти и действий.
 

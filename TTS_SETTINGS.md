@@ -98,3 +98,7 @@ configuration defaults, tests and docs from immediately before this activation.
 Restoring that .env selects V4; restoring its local_config.py also restores the
 V4 default. The original earlier patch rollback above still applies if needed.
 CPU benchmark summary and verification limits are recorded in STATUS.md. Private raw benchmark/cache files are not published.
+
+Streaming is now accepted, enabled/configurable via the four LLM settings inREADME.
+This supersedes any historical pending/defaultfalse text above; false remains the
+full-response fallback. TTS model/voice parameters themselves remain unchanged.

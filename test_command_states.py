@@ -23,6 +23,11 @@ FRAME = b'\0' * 960
 
 def load_function(name, namespace, command_limit=None):
     namespace.setdefault('CommandCancelled', CommandCancelled)
+    from llm_options import completion_options
+    namespace.setdefault('completion_options', completion_options)
+    from tts_audio import synthesize_samples, encode_pcm
+    namespace.setdefault('synthesize_samples', synthesize_samples)
+    namespace.setdefault('encode_pcm', encode_pcm)
     from tts_text_normalizer import normalize_tts_text, remaining_latin_count
     namespace.setdefault('normalize_tts_text', normalize_tts_text)
     namespace.setdefault('remaining_latin_count', remaining_latin_count)

@@ -1,5 +1,9 @@
 # AI Dexter
 
+Current stable milestone v0.3.0-streaming-stable: phases1–3 complete/accepted;
+SileroV5.6CPU and incremental streamed voice replies work through ESP32.
+Phase4 context/natural dialogue is next, not implemented. Newer than snapshots below.
+
 Актуально для v0.2.0-tts-stable: этап2 New TTS принят пользователем, активная Silero V5.6 CPU с пятью голосами и фонетической адаптацией. Следующий этап3 — потоковый голосовой ответ, ещё не реализован. Сведения ниже о первоначальной задаче и планируемых модулях исторические; CosyVoice не интегрирована.
 
 Актуализировано: 2026-11-05. Состояние реализации описано в [STATUS.md](STATUS.md), фактическая схема — в [ARCHITECTURE.md](ARCHITECTURE.md), порядок работ — в [ROADMAP.md](ROADMAP.md).

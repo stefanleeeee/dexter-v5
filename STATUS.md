@@ -1,5 +1,53 @@
 # Состояние AI Dexter
 
+## Этапы 1–3 завершены; streaming принят пользователем (2026-11-06)
+
+Этап1 стабилизации завершён. Этап2 New TTS завершён, рабочая модель Silero V5.6
+CPU. Этап3 Streaming Voice Responses завершён и принят пользователем после
+реальных тестов ESP32-S3. Следующий этап4 — контекст диалога и естественное общение,
+ещё не реализован. Эта запись приоритетнее исторических pending/defaultfalse/length
+error-policy сообщений ниже.
+
+Подтверждено владельцем: короткие и длинные потоковые ответы воспроизводятся через
+динамик ESP32-S3; первая аудиофраза начинает передаваться примерно через0.6–1.2s
+от начала LLM-запроса. Это заявленное время передачи, не измеренная нами акустическая
+задержка. Длинный ответ на10 предложений, около110s аудио, воспроизведён полностью:
+finish_reason=stop, outcome=done, PLAYBACK DONE получен. Новых детальных синхронных
+логов/измерений для дополнительных Reset/network-stall сценариев в этой приёмке
+не предоставлено; они не объявляются проверенными автоматически.
+
+Фактический путь: Groq stream=True → bounded PhraseBuffer → существующий
+фонетический нормализатор → последовательный Silero V5.6 CPU → PCM16LE mono24kHz
+→ единственный TCP writer → ESP bounded queue → I2S. Это incremental LLM +
+озвучивание готовых фраз, не двусторонний speech-to-speech и не native audio-out
+streaming самой Silero. Speaker фиксируется на ответ; buffered audio ограничено.
+Модель/STT/Vosk/firmware/PCM/протокол публикацией не меняются.
+
+Config default/example: LLM_STREAMING=true, LLM_MAX_COMPLETION_TOKENS=2048,
+LLM_REASONING_EFFORT=low, LLM_INCLUDE_REASONING=false. Request uses
+max_completion_tokens (не deprecated max_tokens), model openai/gpt-oss-120b,
+temperature0.7, no reasoning_format conflict. Environment overrides .env; restart
+required. Usage is requested via SDK extra_body.stream_options.include_usage,
+read from usage/x_groq.usage; missing numeric data is null, reasoning text is never
+spoken/logged. README documents all four settings and the exact PowerShell example.
+
+Outcomes: stop→done; length+visible text→partial_length, полученный tail озвучен
+без выдуманного продолжения, EOS/ACK завершает аудио без автоматического CANCEL;
+empty_length→no empty playback. Partial text выводится отдельно и не коммитится
+какполный ответ висторию. User cancel/stale generation/APIerror различаются;
+реальныеошибкипослеaudio используют прежний CANCEL/CANCELLED/errorcleanup.
+Normal reply uses oneSTART/ID/EOS/matchingACK; reconnect never resumes old audio.
+LLM_STREAMING=false remains full-response fallback with the same configurable
+budget/effort; existing voice controls/normalizer and single-model CPU path retained.
+
+Контрольнаяточка: один commit «feat: Phase 3 - Streaming Voice Responses» и
+аннотированный v0.3.0-streaming-stable. Previous v0.2.0-tts-stable preserved.
+Regression target224 tests; final run and release audit recorded below. No new
+Groq/API/model/hardware calls required for publication. Pinned dependencies/ESP
+source unchanged; prior hardware acceptance is owner evidence, not newly run tests.
+Raw local logs/models/configs/benchmarks are excluded; see PUBLICATION.md/MANIFEST.txt.
+
+
 ## Этап 2 — New TTS завершён и принят (2026-11-06)
 
 Пользователь подтвердил завершение и приёмку этапа 2. Эта отметка имеет приоритет над прежними сообщениями об ожидаемом прослушивании/сетевом блокере. Подготовлена точка восстановления `v0.2.0-tts-stable`; этап 3 — потоковый голосовой ответ LLM → TTS → ESP32 — следующий, ещё не реализован. CosyVoice не интегрирована, текущий движок — Silero.
@@ -360,3 +408,5 @@ CosyVoice, потоковая подача текста/генерация от�
 После каждой проверенной работы: номер задачи, изменённое поведение, реально выполненные проверки, результат, ограничения, оставшиеся проблемы и следующий шаг. Не отмечать этап завершённым по одному патчу; не заменять фактические измерения плановыми значениями.
 
 Publication check (Phase2): release-copy unittest discovery passed all165 tests; source/syntax and local-model layout checked. Existing local configs/ESP firmware/dependency pins unchanged. No fresh online dependency installation or new hardware test was performed for publication.
+
+Phase3 publication validation: complete release-copy unittest discovery passed224 tests. Source/AST matches working project; private configs, ESP files and dependency pins unchanged. No new Groq request, package/model install, firmware build or physical hardware action performed. README includes four supported settings/env precedence/startup-only reading and recommended PowerShell values.

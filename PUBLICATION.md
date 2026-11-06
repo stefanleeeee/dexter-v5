@@ -1,31 +1,35 @@
-# Phase 2 public release review
+# Phase 3 stable publication review
 
-Milestone: accepted Phase 2 New TTS (Silero V5.6 CPU). Target branch main;
-commit title `feat: Phase 2 - New TTS (Silero V5.6)`; annotated tag
-`v0.2.0-tts-stable`. Phase 3 streaming is next and not implemented.
+Accepted milestone: Streaming Voice Responses. Target main; one commit
+`feat: Phase 3 - Streaming Voice Responses`; annotated tag
+`v0.3.0-streaming-stable`. Prior history/tags are retained. Phases1–3 complete;
+Phase4 dialogue context/natural conversation is next, not implemented.
 
-Only the current server/config/voice/normalizer source, necessary tests, safe
-.env.example and relevant documentation are included. MANIFEST.txt lists every
-tracked file, not only this update. ESP firmware/build configuration and pinned
-dependencies are unchanged from the phase1 commit. Original working projects and
-ignored local configurations are not overwritten. Existing Git history remains.
+The owner reports short/long ESP32 streaming playback, first phrase transmission
+about0.6–1.2s after LLM start, and a10-sentence/~110s reply with stop/done/PLAYBACK
+DONE. These are owner-reported results; no new acoustic/Reset/stall measurements
+are invented. Publication itself performs no real Groq requests or hardware flash.
 
-Validation: full 165-test offline regression suite; AST/config and documented
-local-model layout checks; staged file list and full diff inspection; known local
-secret matching without printing values; credential/private-key patterns,
-private path/account and binary/size checks; tracked Git blob/history checks;
-root/nested ignore probes. These scans are independent of .gitignore. Automated
-scanning is not an absolute guarantee. Detailed outcomes are in STATUS.md.
+Only allowlisted Python source/tests, safe .env.example, README/docs are updated.
+Firmware, dependency pins, weights and local settings remain unchanged. Local
+configs are never overwritten. MANIFEST.txt lists the entire proposed tree.
 
-Excluded: v4_ru.pt/v5_6_ru.pt and other model weights, model_ru, virtual envs,
-WAV/reference audio, logs, backups, caches, local .env files, Wi-Fi config headers,
-generated sdkconfig, firmware binaries and build artifacts. Neither weights nor
-filled config files are committed, even temporarily. Test credentials are synthetic.
-No additional package installation, physical flashing or live paid API call is
-required for this publication. Existing weights and private configs are retained.
+Exclude filled .env/Wi-Fi headers, generated sdkconfig/build/binaries, .pt/model
+weights, Vosk data, audio/reference/WAV, logs, venvs, backups, caches and private
+raw benchmark/environment reports. Ignore tests supplement, not replace, content
+inspection. Check staged list/full diff, known secrets without printing values,
+private paths/accounts, token/private-key patterns, sizes/binary/reference content,
+then commit/tag and every Git object. Automated scanning is not an absolute guarantee.
+No dedicated scanner installation is required for this audit.
 
-The owner reports completion/acceptance of Phase 2. Prior CPU model checks and
-software loopback are recorded in STATUS.md; no new hardware test is invented.
-README explains deployment using locally supplied trusted v5_6_ru.pt and model-only
-V4 rollback when the corresponding local V4 package is available. Historical
-baseline paragraphs are retained as evidence, with current status taking priority.
+Regression target:224 tests via unittest discovery, including mode/config,
+stop/partial_length/empty_length/cancelled/error, EOS/ACK/CANCEL and history rules,
+phrase order, bounded buffers/backpressure, stale audio, normalizer and rollback.
+README documents LLM_STREAMING, LLM_MAX_COMPLETION_TOKENS, LLM_REASONING_EFFORT,
+LLM_INCLUDE_REASONING, startup/env precedence and local trusted weight deployment.
+No clean network dependency installation is claimed.
+
+Remote main must still equal the known phase2 commit before push. If the tag
+exists unexpectedly or history diverges, stop. Push only main and this annotated
+tag without force; anonymously verify the branch/tag/commit and every public blob
+against the audited tree. Local reports/backups remain outside this repository.

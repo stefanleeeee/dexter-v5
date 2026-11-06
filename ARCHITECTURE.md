@@ -1,5 +1,34 @@
 # Фактическая архитектура Dexter
 
+## Этап 3 — принятая streaming-архитектура (2026-11-06)
+
+Groq LLM streaming → буфер законченных фраз → фонетическая нормализация → Silero
+V5.6 CPU → PCM16LE mono24000Hz → TCP → ESP32 → I2S. Streaming читает deltas
+постепенно; Silero синтезирует фразы последовательно целиком, без native TTS
+stream API. Это не двусторонний speech-to-speech, voice barge-in или AEC.
+
+CommandSession по-прежнему владеет поколением/socket: один worker writer иодин
+reader, общий pipeline/model lock. Памятьограничена: rawtext32768chars,
+phrasebuffer900chars, однаaudioфразавработе; slow sendall backpressures next TTS/
+HTTPread, no unbounded queue. Speaker snapshot наответ, modelCPU/4threads/24kHz.
+Один STARTпослепервогоготовогоPCM, последовательныеevenchunks<=4096, одинEOS/
+matchingACKпослеfinaltail. HTTP-onlywatcherbest-effortзакрываетstreamприcancel;
+начатыйTTS/открывающийсяSDKrequestне убиваются. ExistingCANCELLED/deadlines/
+disconnectfallbackсохранены, stalePCMне переходитвновуюgeneration.
+
+Length — partial result: tailбезавтодополненияозвучивается,EOS/ACKбезcancelтолько
+из-заlength, partialнеhistory-complete. Emptylengthне воспроизводится. Stopdone,
+manual/stalecancelиactualerrorsразличаются. Visiblecontentотдельноотnumericmetrics,
+reasoningfieldsне озвучиваются/не логируются, usageотсутствует→null.
+Defaultstreamtrue/config2048/low/include_reasoningfalse; false—fallbackполного
+ответа. Envприоритетнее.env,startupread→restart. ЧетырепараметраразобранывREADME.
+
+Этапы1–3 принятывладельцем; приёмка110sответа подтвержденасоstop/done/ACK. Сведения
+о другихсценариях ниже исторические,не превращатьихвновыеhardwareclaims.
+Этап4 — контекст/естественноеобщение,не реализован. Firmware/протоколвэтомрелизе
+не меняются. Подробности/метрики/границы STREAMING.md/STATUS.md.
+
+
 ## Accepted Phase 2 — Silero V5.6
 
 The active default TTS is Silero v5_6_ru, CPU/4 threads, raw PCM16LE mono24000Hz.

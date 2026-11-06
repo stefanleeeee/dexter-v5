@@ -1,10 +1,10 @@
-# AI Dexter — Phase 2 New TTS (Silero V5.6)
+# AI Dexter — Phase 3 Streaming Voice Responses
 
-A voice assistant using an ESP32-S3 microphone/speaker and a Python server. Vosk detects “Декстер”; Groq provides command transcription and LLM replies; local Silero V5.6 synthesizes Russian speech on CPU. Phase 2 is accepted; Phase 3 streaming is not implemented. Internet and a Groq API key are required for STT/LLM. CosyVoice, voice barge-in, Windows actions and acoustic echo cancellation are not implemented.
+A voice assistant using an ESP32-S3 microphone/speaker and a Python server. Vosk detects “Декстер”; Groq provides command transcription and LLM replies; local Silero V5.6 synthesizes Russian speech on CPU. Phases 1–3 are complete and accepted; Phase 4 dialogue context/natural conversation is next, not implemented. Internet and a Groq API key are required for STT/LLM. CosyVoice, voice barge-in, Windows actions and acoustic echo cancellation are not implemented.
 
 ## Architecture
 
-ESP I2S microphone → PCM16LE mono 16 kHz → TCP → Python/Vosk wake word → Groq Whisper STT → Groq LLM → Silero V5.6 (selectable voice) → PCM16LE mono 24 kHz → TCP → bounded ESP playback queue → I2S speaker.
+ESP I2S microphone → PCM16LE mono 16 kHz → TCP → Python/Vosk wake word → Groq Whisper STT → Groq LLM streaming → completed-phrase buffer → phonetic normalization → Silero V5.6 CPU (selectable voice) → PCM16LE mono 24 kHz → TCP → bounded ESP playback queue → I2S speaker.
 
 TCP: 5-byte header `[type:u8][length:u32 big-endian]`; raw PCM, no WAV headers. MIC 0x02, START 0x11, PCM 0x12, EOS 0x13, DONE 0x14, CANCEL 0x15, CANCELLED 0x16. Control IDs are 32 bytes (connection UUID + counter). Update server/ESP as a matched pair. DONE follows DMA drain; cancellation clears software/DMA output before CANCELLED. See ARCHITECTURE.md.
 
@@ -57,6 +57,75 @@ protected literals are retained; their pronunciation is not guaranteed.
 See [TTS_SETTINGS.md](TTS_SETTINGS.md) for limits and rollback.
 
 
+## Настройка потоковой генерации LLM
+
+Конфигурация читается при старте: после изменения параметров перезапустите сервер.
+Команды PowerShell ниже действуют для текущей сессии терминала (и запускаемых из
+неё процессов). Переменные окружения имеют приоритет над локальной `.env`.
+Для постоянных настроек используйте игнорируемую `.env`; не добавляйте её в Git.
+
+| Параметр | Рекомендуется | Альтернативы |
+|---|---|---|
+| LLM_STREAMING | true | false |
+| LLM_MAX_COMPLETION_TOKENS | 2048 | 3072, 4096 |
+| LLM_REASONING_EFFORT | low | medium, high |
+| LLM_INCLUDE_REASONING | false | true |
+
+- `LLM_STREAMING`: true включает Groq deltas → готовые фразы → последовательный
+  Silero CPU → PCM; false возвращает режим полного ответа. Парсер также принимает
+  1/0. Streaming ускоряет возможность начать озвучивание, но не обязательно
+  завершение всего ответа. Однофразовый ответ может не получить выигрыша.
+- `LLM_MAX_COMPLETION_TOKENS`: бюджет генерации одного ответа, включая видимый
+  текст и reasoning-токены. Локальный парсер принимает целое1..32768; это защитный
+  диапазон конфигурации, не утверждение о максимальном контексте модели.
+  Рекомендуется2048, для длинных ответов3072/4096. Увеличение бюджета не означает
+  автоматического расхода всех токенов; фактический расход и длительность ответа
+  могут вырасти. Usage учитывается по данным API, отсутствующие значения — null.
+- `LLM_REASONING_EFFORT`: low/medium/high для текущей openai/gpt-oss-120b.
+  Low предназначен для быстрых повседневных ответов; medium/high могут тратить
+  больше токенов/времени на сложные рассуждения. Это не гарантия фиксированной
+  задержки или качества. Настройка применяется также в режиме полного ответа.
+- `LLM_INCLUDE_REASONING`: false/true (также0/1) управляет возвратом reasoning-поля
+  в ответе API. False рекомендуется голосовому ассистенту и **не отключает само
+  вычисление reasoning**. Даже при true Dexter не озвучивает и не логирует это
+  поле: пользовательским текстом считается только content. Несовместимый
+  reasoning_format вместе с include_reasoning не передаётся.
+
+Пример из корня проекта после остановки старого сервера через Ctrl+C:
+
+```powershell
+# Включить потоковую генерацию ответов.
+$env:LLM_STREAMING = 'true'
+
+# Максимальный бюджет генерации одного ответа.
+# Включает видимый текст и reasoning-токены.
+# Рекомендуемое значение: 2048.
+# Для более длинных ответов можно попробовать 3072 или 4096.
+$env:LLM_MAX_COMPLETION_TOKENS = '2048'
+
+# Усилие рассуждения модели.
+# low — быстрые повседневные ответы.
+# medium — более сложные задачи.
+# high — более глубокие рассуждения, потенциально дольше.
+$env:LLM_REASONING_EFFORT = 'low'
+
+# Включать ли reasoning-содержимое в ответ API.
+# false — рекомендуемое значение для голосового ассистента.
+# Не отключает само вычисление reasoning.
+$env:LLM_INCLUDE_REASONING = 'false'
+
+# Запуск Dexter.
+& '.\.venv\Scripts\python.exe' -B '.\server.py'
+```
+
+Эти значения уже заданы в безопасном `.env.example`. При `finish_reason=stop`
+нормальный исход — done; `length` с текстом — partial_length с выводом полученного
+текста и завершением его PCM через EOS/ACK, без автоматического CANCEL только из-за
+лимита. Такой ответ не добавляется в историю как полностью завершённый.
+`empty_length` не запускает пустое воспроизведение; cancelled/error различаются.
+Нет автоматического продолжения ответа дополнительными запросами.
+Полные ограничения и определения метрик: [STREAMING.md](STREAMING.md).
+
 ## ESP32-S3 setup
 
 Tested with ESP-IDF v6.1 and target esp32s3. In the ESP-IDF terminal:
@@ -80,10 +149,10 @@ Wiring: microphone I2S1, BCLK=4, WS=5, DIN=6, 16 kHz / left 32-bit slot converte
 Offline tests do not import server.py or call real models/cloud APIs. C tests execute extracted firmware functions with a fake SDK through clang and llvmlite. Install requirements-dev.txt only if you want these development tests. Make clang (LLVM compatible with llvmlite 0.47) available in PATH or set DEXTER_ESP_CLANG to its executable. The test fixture can also use DEXTER_ESP_SOURCE for another source tree.
 
 ```powershell
-python -B -m unittest -q test_command_states test_session_runtime test_esp_transport test_reconnect_timeouts test_playback_ack test_cancel test_pcm_edges test_local_config test_tts_upgrade
+python -B -m unittest -q test_command_states test_session_runtime test_esp_transport test_reconnect_timeouts test_playback_ack test_cancel test_pcm_edges test_local_config test_tts_upgrade test_llm_stream test_phrase_buffer test_streaming_audio test_streaming_transport test_streaming_mode test_length_handling
 ```
 
-Tests needing clang/llvmlite require both tools; a missing dependency is not a passing firmware test. 165 tests cover states, framing, timeouts, ACK/CANCEL, PCM/long text, configuration, voice switching/concurrency, phonetic normalization and prompt/history preservation. See STATUS.md/PUBLICATION.md for actual results.
+Tests needing clang/llvmlite require both tools; a missing dependency is not a passing firmware test. 224 tests cover states/framing/timeouts, streaming phrase order and backpressure, ACK/CANCEL, PCM/long text, configuration, voice switching, phonetic normalization, prompt/history and partial-length outcomes. See STATUS.md/PUBLICATION.md for actual results.
 
 ## Evidence and limits
 
@@ -91,12 +160,12 @@ PROJECT.md describes scope; ROADMAP.md planned work; ARCHITECTURE.md implementat
 
 ## Stable recovery point
 
-The accepted New TTS milestone is tagged `v0.2.0-tts-stable`. To inspect/recover
+The accepted streaming milestone is tagged `v0.3.0-streaming-stable`; the prior New TTS milestone remains at `v0.2.0-tts-stable`. To inspect/recover
 it without overwriting a current worktree with local changes, use:
 
 ```powershell
-git fetch origin tag v0.2.0-tts-stable
-git worktree add --detach ../dexter-v0.2.0 v0.2.0-tts-stable
+git fetch origin tag v0.3.0-streaming-stable
+git worktree add --detach ../dexter-v0.3.0 v0.3.0-streaming-stable
 ```
 
 The new worktree still needs its own ignored `.env`, ESP local configuration and

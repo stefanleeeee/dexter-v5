@@ -19,6 +19,9 @@ from cancel_control import CancelControl
 from local_config import load_config, redact_log
 from tts_text_normalizer import normalize_tts_text, remaining_latin_count
 from voice_settings import VoiceSettings
+from tts_audio import synthesize_samples, encode_pcm
+from streaming_reply import stream_reply
+from llm_options import completion_options
 
 # === НАСТРОЙКИ ===
 try:
@@ -59,6 +62,8 @@ silero_model.to(device)
 voice_settings = VoiceSettings(CONFIG.tts_model, silero_model.speakers, CONFIG.tts_voice)
 log(f"[TTS] Model={CONFIG.tts_model}, speaker={voice_settings.snapshot()}, CPU, 24000 Hz, normalization={CONFIG.tts_normalize_en}")
 log("[INIT] Голосовой движок успешно загружен в ОЗУ!")
+log(f"[MODE] LLM_STREAMING={CONFIG.llm_streaming}")
+log(f"[LLM CONFIG] max_completion_tokens={CONFIG.llm_max_completion_tokens}, reasoning_effort={CONFIG.llm_reasoning_effort}, include_reasoning={CONFIG.llm_include_reasoning}")
 
 def send_audio_to_esp32(conn, text_response, session_id=""):
     log(f"[{session_id}] [TTS] Синтез речи (Silero TTS)...")
@@ -87,16 +92,13 @@ def send_audio_to_esp32(conn, text_response, session_id=""):
             conn.check_active()
             if not sentence.strip(): continue
                 
-            tensor = silero_model.apply_tts(text=sentence, speaker=speaker, sample_rate=24000)
-            samples = np.asarray(tensor.numpy())
-            if samples.ndim != 1 or samples.size == 0 or not np.isfinite(samples).all():
-                raise ValueError('Invalid TTS audio: expected nonempty finite mono samples')
+            samples = synthesize_samples(silero_model, sentence, speaker, conn.check_active)
             audio_pieces.append(samples)
             
         if not audio_pieces: return
 
         audio_np = np.concatenate(audio_pieces)
-        raw_pcm = (np.clip(audio_np, -1.0, 1.0) * 32767).astype('<i2').tobytes()
+        raw_pcm = encode_pcm(audio_np)
         raw_pcm += b'\x00' * (24000 * 2 // 4) 
         
         t_tts_ready = time.time()
@@ -177,29 +179,49 @@ def process_command(conn, audio_bytes, state, session=None):
             messages.append({"role": "user", "content": user_text})
 
             if session is not None: session.check_active()
-            chat_completion = groq_client.chat.completions.create(
-                messages=messages, model="openai/gpt-oss-120b", temperature=0.7, max_tokens=500
-            )
-            response_text = chat_completion.choices[0].message.content
-            log(f"[{session_id}] [LLM ОТВЕТ] (за {time.time() - t_llm_start:.2f} с):\n{response_text}\n=============")
+            streaming = getattr(CONFIG, 'llm_streaming', False)
+            if streaming:
+                response_text, stream_metrics = stream_reply(
+                    conn, groq_client.chat.completions.create, messages, silero_model,
+                    voice_settings.snapshot(), CONFIG.tts_normalize_en, log,
+                    options=completion_options(CONFIG, streaming=True))
+                if not response_text.strip():
+                    log('[STREAM ПУСТОЙ ОТВЕТ] outcome=' + stream_metrics.get('outcome', 'done') + '; visible_chars=0, без воспроизведения/истории')
+                    return
+            else:
+                chat_completion = groq_client.chat.completions.create(
+                    messages=messages, **completion_options(CONFIG)
+                )
+                response_text = chat_completion.choices[0].message.content or ''
+            partial = (stream_metrics.get('outcome') == 'partial_length') if streaming else (getattr(chat_completion.choices[0], 'finish_reason', 'stop') == 'length')
+            if streaming and partial:
+                log(f"[{session_id}] [STREAM ЧАСТИЧНЫЙ ОТВЕТ: length]\n{response_text}\n[ЛИМИТ] Полученный текст озвучен до конца, продолжение не запрашивается; история не пополнена.")
+            elif streaming:
+                log(f"[{session_id}] [STREAM ОТВЕТ] (полный цикл до ACK за {time.time() - t_llm_start:.2f} с):\n{response_text}\n=============")
+            elif partial:
+                log(f"[{session_id}] [LLM ЧАСТИЧНЫЙ ОТВЕТ: length]\n{response_text}")
+            else:
+                log(f"[{session_id}] [LLM ОТВЕТ] (за {time.time() - t_llm_start:.2f} с):\n{response_text}\n=============")
             
             def commit_history():
                 CHAT_HISTORY.append({"role": "user", "content": user_text})
                 CHAT_HISTORY.append({"role": "assistant", "content": response_text})
 
-            if session is not None:
-                session.commit(commit_history)
-            else:
-                commit_history()
+            if not partial:
+                if session is not None:
+                    session.commit(commit_history)
+                else:
+                    commit_history()
             
-            success = send_audio_to_esp32(conn, response_text, session_id)
-            if session is not None: session.check_active()
-            if not success:
-                log(f"[{session_id}] [СБРОС] Прерываем обработку из-за ошибки отправки.")
+            if not streaming:
+                success = send_audio_to_esp32(conn, response_text, session_id)
+                if session is not None: session.check_active()
+                if not success:
+                    log(f"[{session_id}] [СБРОС] Прерываем обработку из-за ошибки отправки.")
         except CommandCancelled:
             return
         except Exception as e:
-            log(f"[{session_id}] [ОШИБКА LLM] {e}")
+            log(f"[{session_id}] [ОШИБКА LLM] {type(e).__name__}")
 
     finally:
         # Гарантированная очистка независимо от ошибок и return-ов

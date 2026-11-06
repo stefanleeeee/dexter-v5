@@ -14,6 +14,10 @@ class Config:
     tts_model: str = 'v5_6_ru'
     tts_voice: str = 'aidar'
     tts_normalize_en: bool = True
+    llm_streaming: bool = True
+    llm_max_completion_tokens: int = 2048
+    llm_reasoning_effort: str = 'low'
+    llm_include_reasoning: bool = False
 
 
 def load_config(path=None, environ=None):
@@ -28,7 +32,7 @@ def load_config(path=None, environ=None):
                     continue
                 key, separator, value = line.partition('=')
                 key, value = key.strip(), value.strip()
-                if not separator or key not in {'GROQ_API_KEY', 'HOST', 'PORT', 'TTS_MODEL', 'TTS_VOICE', 'TTS_NORMALIZE_EN'}:
+                if not separator or key not in {'GROQ_API_KEY', 'HOST', 'PORT', 'TTS_MODEL', 'TTS_VOICE', 'TTS_NORMALIZE_EN', 'LLM_STREAMING', 'LLM_MAX_COMPLETION_TOKENS', 'LLM_REASONING_EFFORT', 'LLM_INCLUDE_REASONING'}:
                     raise ValueError('Invalid .env entry; use the supplied .env.example')
                 if value.startswith('"'):
                     value = json.loads(value)
@@ -41,7 +45,7 @@ def load_config(path=None, environ=None):
                 values[key] = value
     except (OSError, UnicodeError, ValueError):
         raise ValueError('Cannot read local .env; check format and permissions') from None
-    values.update({key: env[key] for key in ('GROQ_API_KEY', 'HOST', 'PORT', 'TTS_MODEL', 'TTS_VOICE', 'TTS_NORMALIZE_EN') if key in env})
+    values.update({key: env[key] for key in ('GROQ_API_KEY', 'HOST', 'PORT', 'TTS_MODEL', 'TTS_VOICE', 'TTS_NORMALIZE_EN', 'LLM_STREAMING', 'LLM_MAX_COMPLETION_TOKENS', 'LLM_REASONING_EFFORT', 'LLM_INCLUDE_REASONING') if key in env})
     api_key = values.get('GROQ_API_KEY', '').strip()
     if not api_key or api_key == 'YOUR_GROQ_API_KEY':
         raise ValueError('Set GROQ_API_KEY in the environment or local .env')
@@ -63,7 +67,21 @@ def load_config(path=None, environ=None):
     normalize = values.get('TTS_NORMALIZE_EN', 'true').strip().casefold()
     if normalize not in {'true', 'false', '1', '0'}:
         raise ValueError('TTS_NORMALIZE_EN must be true/false or 1/0')
-    return Config(api_key, host, port, model, voice, normalize in {'true', '1'})
+    streaming = values.get('LLM_STREAMING', 'true').strip().casefold()
+    if streaming not in {'true', 'false', '1', '0'}:
+        raise ValueError('LLM_STREAMING must be true/false or 1/0')
+    try:
+        tokens = int(values.get('LLM_MAX_COMPLETION_TOKENS', '2048'))
+        if not 1 <= tokens <= 32768: raise ValueError()
+    except (ValueError, TypeError):
+        raise ValueError('LLM_MAX_COMPLETION_TOKENS must be an integer between 1 and 32768') from None
+    effort = values.get('LLM_REASONING_EFFORT', 'low').strip().casefold()
+    if effort not in {'low', 'medium', 'high'}:
+        raise ValueError('LLM_REASONING_EFFORT must be low, medium or high for GPT-OSS')
+    include = values.get('LLM_INCLUDE_REASONING', 'false').strip().casefold()
+    if include not in {'true', 'false', '1', '0'}:
+        raise ValueError('LLM_INCLUDE_REASONING must be true/false or 1/0')
+    return Config(api_key, host, port, model, voice, normalize in {'true', '1'}, streaming in {'true', '1'}, tokens, effort, include in {'true', '1'})
 
 
 def redact_log(message, config):
