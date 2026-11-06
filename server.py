@@ -1,0 +1,359 @@
+import socket
+import select
+import os
+import struct
+import wave
+import webrtcvad
+import datetime
+import torch
+import re
+import json
+import numpy as np
+import threading
+import time
+import uuid
+from vosk import Model, KaldiRecognizer
+from groq import Groq
+from session_runtime import CommandSession, CommandCancelled
+from cancel_control import CancelControl
+from local_config import load_config, redact_log
+
+# === НАСТРОЙКИ ===
+try:
+    CONFIG = load_config()
+except ValueError as error:
+    raise SystemExit(f"Configuration error: {error}") from None
+HOST = CONFIG.host
+PORT = CONFIG.port
+GROQ_API_KEY = CONFIG.api_key
+
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+CHAT_HISTORY = []
+
+def log(msg):
+    timestamp = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
+    print(f"[{timestamp}] {redact_log(msg, CONFIG)}")
+
+log("[INIT] Загрузка дежурной нейросети Vosk (Wake Word)...")
+if not os.path.exists("model_ru"):
+    log("[ОШИБКА] Папка 'model_ru' не найдена! Скачай модель Vosk.")
+    exit(1)
+vosk_model = Model("model_ru")
+wake_recognizer = KaldiRecognizer(vosk_model, 16000)
+log("[INIT] Дежурный контур готов к поиску имени 'Декстер'.")
+
+log("[INIT] Загрузка локальной нейросети Silero TTS...")
+device = torch.device('cpu')
+torch.set_num_threads(4)
+local_file = 'v4_ru.pt'
+
+if not os.path.isfile(local_file):
+    log(f"[ОШИБКА] Файл '{local_file}' не найден в папке со скриптом!")
+    exit(1)
+
+silero_model = torch.package.PackageImporter(local_file).load_pickle("tts_models", "model")
+silero_model.to(device)
+log("[INIT] Голосовой движок успешно загружен в ОЗУ!")
+
+def send_audio_to_esp32(conn, text_response, session_id=""):
+    log(f"[{session_id}] [TTS] Синтез речи (Silero TTS)...")
+    t_tts_start = time.time()
+    try:
+        text_response = text_response.replace('\n', ' ').strip()
+        # Bound each model call without dropping the remainder of a long sentence.
+        sentences = []
+        for sentence in re.split(r'(?<=[.!?])\s+', text_response):
+            while len(sentence) > 900:
+                boundary = sentence.rfind(' ', 0, 901)
+                if boundary <= 0: boundary = 900
+                sentences.append(sentence[:boundary])
+                sentence = sentence[boundary:].lstrip()
+            if sentence.strip(): sentences.append(sentence)
+        if not sentences: return True
+        
+        audio_pieces = []
+        for sentence in sentences:
+            conn.check_active()
+            if not sentence.strip(): continue
+                
+            tensor = silero_model.apply_tts(text=sentence, speaker='aidar', sample_rate=24000)
+            samples = np.asarray(tensor.numpy())
+            if samples.ndim != 1 or samples.size == 0 or not np.isfinite(samples).all():
+                raise ValueError('Invalid TTS audio: expected nonempty finite mono samples')
+            audio_pieces.append(samples)
+            
+        if not audio_pieces: return
+
+        audio_np = np.concatenate(audio_pieces)
+        raw_pcm = (np.clip(audio_np, -1.0, 1.0) * 32767).astype('<i2').tobytes()
+        raw_pcm += b'\x00' * (24000 * 2 // 4) 
+        
+        t_tts_ready = time.time()
+        log(f"[{session_id}] [СЕТЬ] Отправка СТАРТ (0x11). Синтез занял: {t_tts_ready - t_tts_start:.2f} сек")
+        playback_token = conn.begin_playback()
+        
+        chunk_size = 4096
+        for i in range(0, len(raw_pcm), chunk_size):
+            chunk = raw_pcm[i:i+chunk_size]
+            header = bytearray([0x12])
+            header.extend(struct.pack('>I', len(chunk)))
+            conn.sendall(header + chunk)
+            time.sleep(0.075)
+            
+        log(f"[{session_id}] [СЕТЬ] Отправка СТОП (0x13). Передача заняла: {time.time() - t_tts_ready:.2f} сек")
+        conn.finish_playback(playback_token)
+        return True # Успех
+    except CommandCancelled:
+        log(f"[{session_id}] [CANCEL] Синтез/передача ответа отменены.")
+        return False
+    except (ConnectionError, BrokenPipeError, TimeoutError, OSError) as e:
+        log(f"[{session_id}] [ОШИБКА СЕТИ] Сокет недоступен или разорван основным потоком: {e}")
+        return False # Ошибка сети
+    except Exception as e:
+        log(f"[{session_id}] [ОШИБКА TTS] {e}")
+        return False # Внутренняя ошибка
+
+# Выделяем тяжелую обработку в отдельный поток
+def process_command(conn, audio_bytes, state, session=None):
+    session_id = state.get("session_id", "SYS")
+    temp_in_wav = f"upload_temp_{session_id}.wav"
+    
+    try:
+        if session is not None:
+            session.check_active()
+        log(f"[{session_id}] [DSP] Команда записана ({len(audio_bytes)} байт). Нормализация AGC...")
+        
+        if not audio_bytes or len(audio_bytes) % 2:
+            raise ValueError('Command PCM must contain complete PCM16 samples')
+        audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+        max_val = np.max(np.abs(audio_np, dtype="int32"))
+        if max_val > 0:
+            scale = 28000.0 / max_val
+            audio_np = np.clip(audio_np * scale, -32768, 32767).astype(np.int16)
+        clean_audio = audio_np.tobytes()
+
+        with wave.open(temp_in_wav, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(clean_audio)
+
+        log(f"[{session_id}] [GROQ STT] Распознавание команды (Whisper)...")
+        t_stt_start = time.time()
+        try:
+            if session is not None: session.check_active()
+            with open(temp_in_wav, "rb") as file:
+                transcription = groq_client.audio.transcriptions.create(
+                  file=(temp_in_wav, file.read()), model="whisper-large-v3"
+                )
+            user_text = transcription.text
+            if session is not None:
+                session.check_active()
+            log(f"[{session_id}] [РАСПОЗНАНО] (за {time.time() - t_stt_start:.2f} с): {user_text}")
+        except CommandCancelled:
+            return
+        except Exception as e:
+            log(f"[{session_id}] [ОШИБКА STT] {e}")
+            return # Выходим, но finally всё равно сработает!
+
+        try:
+            log(f"[{session_id}] [GROQ LLM] Генерация ответа (OpenAI GPT-OSS-120b)...")
+            t_llm_start = time.time()
+            messages = [
+                {"role": "system", "content": "Ты — голосовой ассистент Декстер. Давай глубокие инженерные ответы, но при просьбах говорить коротко — отвечай предельно кратко. Запрещено использовать Markdown (*, #, -, списки). Генерируй только сплошной текст. Все числа пиши словами."}
+            ]
+            for msg in CHAT_HISTORY[-4:]: messages.append(msg)
+            messages.append({"role": "user", "content": user_text})
+
+            if session is not None: session.check_active()
+            chat_completion = groq_client.chat.completions.create(
+                messages=messages, model="openai/gpt-oss-120b", temperature=0.7, max_tokens=500
+            )
+            response_text = chat_completion.choices[0].message.content
+            log(f"[{session_id}] [LLM ОТВЕТ] (за {time.time() - t_llm_start:.2f} с):\n{response_text}\n=============")
+            
+            def commit_history():
+                CHAT_HISTORY.append({"role": "user", "content": user_text})
+                CHAT_HISTORY.append({"role": "assistant", "content": response_text})
+
+            if session is not None:
+                session.commit(commit_history)
+            else:
+                commit_history()
+            
+            success = send_audio_to_esp32(conn, response_text, session_id)
+            if session is not None: session.check_active()
+            if not success:
+                log(f"[{session_id}] [СБРОС] Прерываем обработку из-за ошибки отправки.")
+        except CommandCancelled:
+            return
+        except Exception as e:
+            log(f"[{session_id}] [ОШИБКА LLM] {e}")
+
+    finally:
+        # Гарантированная очистка независимо от ошибок и return-ов
+        if os.path.exists(temp_in_wav):
+            try:
+                os.remove(temp_in_wav)
+            except Exception as e:
+                log(f"[{session_id}] [ОШИБКА ОЧИСТКИ] Не удалось удалить {temp_in_wav}: {e}")
+        
+        state["mode"] = "WAKE_WORD"
+        if session is None:
+            log(f"\n[ОЖИДАНИЕ] Декстер снова ждет своего имени...")
+
+def recvall(conn, n, session_id="SYS"):
+    data = bytearray()
+    deadline = time.monotonic() + 10.0
+    while len(data) < n:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([conn], [], [], remaining)[0]:
+                raise TimeoutError("Incomplete TCP frame exceeded its deadline")
+            packet = conn.recv(n - len(data))
+            if time.monotonic() >= deadline:
+                raise TimeoutError("TCP frame arrived after its deadline")
+            if not packet:
+                log(f"[{session_id}] [СЕТЬ] Клиент разорвал соединение. Ждали {n} байт, получили {len(data)}.")
+                return None
+            data.extend(packet)
+        except TimeoutError:
+            log(f"[{session_id}] [ОШИБКА СЕТИ] Тайм-аут сокета! ESP32 перестал слать данные.")
+            return None
+        except Exception as e:
+            log(f"[{session_id}] [ОШИБКА СЕТИ] Ошибка recv: {e}")
+            return None
+    return bytes(data)
+
+def start_server(control=None):
+    vad = webrtcvad.Vad(3)
+    FRAME_SIZE = 960
+    MAX_COMMAND_FRAMES = 233 
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((HOST, PORT))
+        s.listen()
+        log(f"Сервер слушает порт {PORT}...")
+        
+        while True:
+            try:
+                conn, addr = s.accept()
+                with CommandSession(conn, log) as session:
+                    if control is not None: control.attach(session)
+                    log(f"ESP32 подключен: {addr}")
+                    conn.settimeout(10.0)
+                    state = session.state
+                    command_buffer = bytearray()
+                    stream_buffer = bytearray()
+                    silence_frames = 0
+                    command_frames = 0
+                    
+                    while True:
+                        session.poll()
+                        current_session = state.get("session_id", "SYS")
+                        header = recvall(conn, 5, current_session) 
+                        if not header: break
+                        msg_type = header[0]
+
+                        if msg_type in (0x14, 0x16):
+                            length = struct.unpack('>I', header[1:5])[0]
+                            if length != 32:
+                                log('[СЕТЬ] Некорректная длина playback ACK; закрываем соединение.')
+                                break
+                            token = recvall(conn, length, current_session)
+                            if token is None: break
+                            accepted = (session.receive_playback_ack(token) if msg_type == 0x14
+                                        else session.receive_cancel_ack(token))
+                            if not accepted:
+                                log('[СЕТЬ] Игнорируем устаревший/неожиданный playback ACK.')
+                            continue
+                        
+                        if msg_type == 0x02:
+                            length = struct.unpack('>I', header[1:5])[0]
+                            
+                            # Диагностика аномальных пакетов от микрофона
+                            if length > 32000 or length % 2:
+                                log(f"[{current_session}] [ОШИБКА СЕТИ] Аномальная длина пакета микрофона: {length} байт. Игнорируем.")
+                                break
+
+                            chunk = recvall(conn, length, current_session)
+                            if not chunk: break
+
+                            session.poll()
+                            
+                            if state["mode"] == "PROCESSING":
+                                continue
+
+                            stream_buffer.extend(chunk)
+
+                            while len(stream_buffer) >= FRAME_SIZE:
+                                frame_bytes = bytes(stream_buffer[:FRAME_SIZE])
+                                del stream_buffer[:FRAME_SIZE]
+                                
+                                pcm_np = np.frombuffer(frame_bytes, dtype=np.int16)
+                                vol = np.max(np.abs(pcm_np, dtype="int32"))
+
+                                is_speech = False
+                                if vol > 1000:
+                                    is_speech = vad.is_speech(frame_bytes, 16000)
+
+                                if state["mode"] == "WAKE_WORD":
+                                    if wake_recognizer.AcceptWaveform(frame_bytes):
+                                        result = json.loads(wake_recognizer.Result())
+                                        text = result.get("text", "")
+                                        if text: log(f"[VOSK УСЛЫШАЛ]: {text}")
+                                    else:
+                                        partial = json.loads(wake_recognizer.PartialResult())
+                                        text = partial.get("partial", "")
+                                        
+                                    if "декстер" in text.lower() or "dexter" in text.lower():
+                                        log("\n[АКТИВАЦИЯ] Имя 'Декстер' распознано! Слушаю команду...")
+                                        state["mode"] = "COMMAND"
+                                        state["session_id"] = str(uuid.uuid4())[:6]
+                                        command_buffer.clear()
+                                        silence_frames = 0
+                                        command_frames = 0
+                                        wake_recognizer.Reset() 
+
+                                elif state["mode"] == "COMMAND":
+                                    command_buffer.extend(frame_bytes)
+                                    command_frames += 1
+                                    
+                                    if is_speech:
+                                        silence_frames = 0
+                                        print("=", end="", flush=True)
+                                    else:
+                                        silence_frames += 1
+                                        print("-", end="", flush=True)
+                                        
+                                    if silence_frames > 50 or command_frames > MAX_COMMAND_FRAMES:
+                                        print() 
+                                        if len(command_buffer) > 16000:
+                                            log("[СТОП] Запись завершена. Отправка в Groq...")
+                                            state["mode"] = "PROCESSING"
+                                            # Остаток текущего payload относится к старой записи.
+                                            stream_buffer.clear()
+                                            try:
+                                                session.start(process_command, bytearray(command_buffer), thread_factory=threading.Thread)
+                                            except Exception:
+                                                state["mode"] = "WAKE_WORD"
+                                                raise
+                                        else:
+                                            log("[СБРОС] Слишком короткая команда.")
+                                            state["mode"] = "WAKE_WORD"
+                                            log("\n[ОЖИДАНИЕ] Декстер снова ждет своего имени...")
+                                            stream_buffer.clear()
+                                        command_buffer.clear()
+                                        break
+            
+            except (ConnectionError, ConnectionResetError) as e:
+                log(f"[СЕТЬ] Обрыв связи с ESP32: {e}. Ждем переподключения...")
+            except Exception as e:
+                log(f"[ОШИБКА СЕРВЕРА] {e}")
+
+if __name__ == "__main__":
+    cancel_control = CancelControl(log)
+    cancel_control.start()
+    start_server(cancel_control)

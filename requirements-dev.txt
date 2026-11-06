@@ -1,0 +1,2 @@
+# Optional C fault-injection tests; install only in a development environment.
+llvmlite==0.47.0

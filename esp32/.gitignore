@@ -1,0 +1,4 @@
+build/
+sdkconfig
+sdkconfig.old
+main/dexter_local_config.h
